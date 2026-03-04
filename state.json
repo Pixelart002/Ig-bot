@@ -1,0 +1,95 @@
+{
+  "cookies": [
+    {
+      "name": "datr",
+      "value": "0vynaRqIHDPhO77mX_SM7WUo",
+      "domain": ".instagram.com",
+      "path": "/",
+      "expires": 1807176914.852508,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "ds_user_id",
+      "value": "80408602664",
+      "domain": ".instagram.com",
+      "path": "/",
+      "expires": 1780393019.11842,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "csrftoken",
+      "value": "wBtOI3nsQEefVbYo9ZlaBi",
+      "domain": ".instagram.com",
+      "path": "/",
+      "expires": 1807177019.116601,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ig_did",
+      "value": "5C83DF16-90C6-4CF6-95A9-17D0480B40F8",
+      "domain": ".instagram.com",
+      "path": "/",
+      "expires": 1804152914.852571,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "wd",
+      "value": "346x609",
+      "domain": ".instagram.com",
+      "path": "/",
+      "expires": 1773221767,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "mid",
+      "value": "aaf80gABAAGKId-bTaTtrHoE_urW",
+      "domain": ".instagram.com",
+      "path": "/",
+      "expires": 1807176929,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sessionid",
+      "value": "80408602664%3AtGsm8YOJVJr2v7%3A6%3AAYi62Zej1NkFLXeEjSjm8hwZN2h3JyXE3LgZRBWpug",
+      "domain": ".instagram.com",
+      "path": "/",
+      "expires": 1804152950.210424,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "dpr",
+      "value": "2.0818521976470947",
+      "domain": ".instagram.com",
+      "path": "/",
+      "expires": 1773221805,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "rur",
+      "value": "\"VLL\\05480408602664\\0541804153014:01fe622ba5dafa287fc1e9f132c06f742fb50d89fd556e912c0a1f4f38b0e29af5f8f761\"",
+      "domain": ".instagram.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": []
+}
