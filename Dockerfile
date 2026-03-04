@@ -5,12 +5,11 @@ RUN apt-get update && apt-get install -y \
     wget curl chromium chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Setup Pinchtab (Using a more reliable link structure)
-# Agar v0.0.3 fail ho raha hai, toh hum direct binary link ko verify karenge
-RUN wget -q https://github.com/pinchtab/pinchtab/releases/latest/download/pinchtab_Linux_x86_64.tar.gz || \
-    wget -q https://github.com/pinchtab/pinchtab/releases/download/v0.0.3/pinchtab_linux_amd64.tar.gz \
-    && tar -xvf *.tar.gz \
-    && find . -name "pinchtab" -exec mv {} /usr/local/bin/pinchtab \; \
+# 2. Setup Pinchtab (Foolproof Dynamic Link Fetching)
+RUN LATEST_URL=$(curl -s https://api.github.com/repos/pinchtab/pinchtab/releases/latest | grep "browser_download_url.*linux_amd64.tar.gz" | cut -d '"' -f 4) \
+    && wget -q $LATEST_URL -O pinchtab.tar.gz \
+    && tar -xvf pinchtab.tar.gz \
+    && find . -name "pinchtab" -type f -exec mv {} /usr/local/bin/pinchtab \; \
     && chmod +x /usr/local/bin/pinchtab
 
 WORKDIR /app
