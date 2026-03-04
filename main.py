@@ -1,33 +1,31 @@
+import os
 import asyncio
-from playwright.async_api import async_playwright
-from flask import Flask
 import threading
-import requests
+from flask import Flask
+import subprocess
 
 app = Flask(__name__)
 
 @app.route('/')
-def home(): return {"status": "Aether-Swarm Secure Mode Active"}
+def health():
+    return {"status": "Aether-Swarm is Running via Buildpack", "agents": "Active"}
 
-async def run_swarm():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        # Persistent context use karna secure hota hai
-        context = await browser.new_context(user_agent="Mozilla/5.0 ...")
-        page = await context.new_page()
-        
-        print("🧠 Swarm Brain (Mistral) planning post...")
-        # Step 1: Get Content from Mistral
-        # Step 2: Get Visuals from Flux
-        # Step 3: Playwright Navigates to Instagram
-        
-        await page.goto("https://www.instagram.com/")
-        print("✅ Navigation Successful")
-        await browser.close()
+def install_playwright():
+    print("📦 Installing Playwright Browsers...")
+    subprocess.run(["playwright", "install", "chromium"])
 
-def start_flask():
-    app.run(host='0.0.0.0', port=8000)
+def swarm_logic():
+    # Playwright install hone ka intezar karein
+    install_playwright()
+    while True:
+        print("🧠 Swarm Agents are analyzing trends...")
+        # Tumhari Mistral + Flux + Playwright logic yahan aayegi
+        import time
+        time.sleep(3600)
 
 if __name__ == "__main__":
-    threading.Thread(target=start_flask).start()
-    asyncio.run(run_swarm())
+    # Swarm ko alag thread mein chalayein
+    threading.Thread(target=swarm_logic, daemon=True).start()
+    # Flask for Koyeb Health Check
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host='0.0.0.0', port=port)
