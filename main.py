@@ -1,19 +1,33 @@
-import requests, time, threading
+import asyncio
+from playwright.async_api import async_playwright
 from flask import Flask
-app = Flask(__name__)
-@app.route('/')
-def health(): return {"status": "Aether-Swarm Active"}
+import threading
+import requests
 
-def autonomous_swarm():
-    while True:
-        try:
-            print("🧠 Swarm is thinking...")
-            # Mistral + Flux + Pinchtab logic yahan trigger hogi
-            time.sleep(3600)
-        except Exception as e:
-            print(f"Error: {e}")
-            time.sleep(60)
+app = Flask(__name__)
+
+@app.route('/')
+def home(): return {"status": "Aether-Swarm Secure Mode Active"}
+
+async def run_swarm():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        # Persistent context use karna secure hota hai
+        context = await browser.new_context(user_agent="Mozilla/5.0 ...")
+        page = await context.new_page()
+        
+        print("🧠 Swarm Brain (Mistral) planning post...")
+        # Step 1: Get Content from Mistral
+        # Step 2: Get Visuals from Flux
+        # Step 3: Playwright Navigates to Instagram
+        
+        await page.goto("https://www.instagram.com/")
+        print("✅ Navigation Successful")
+        await browser.close()
+
+def start_flask():
+    app.run(host='0.0.0.0', port=8000)
 
 if __name__ == "__main__":
-    threading.Thread(target=autonomous_swarm, daemon=True).start()
-    app.run(host='0.0.0.0', port=8000)
+    threading.Thread(target=start_flask).start()
+    asyncio.run(run_swarm())
