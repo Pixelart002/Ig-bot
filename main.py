@@ -1,57 +1,48 @@
 import asyncio
 import os
-import requests
-import time
 import threading
-from flask import Flask
+from flask import Flask, send_file
 from playwright.async_api import async_playwright
-
-# Universal Stealth Import Logic
-try:
-    from playwright_stealth import stealth_async as stealth_func
-except ImportError:
-    from playwright_stealth import stealth as stealth_func
+from playwright_stealth import stealth
+import io
 
 app = Flask(__name__)
-
-MISTRAL_URL = "https://mistral-ai-three.vercel.app/"
-FLUX_URL = "https://flux-schnell.hello-kaiiddo.workers.dev/img"
+global_page = None  # Isme live browser screen save hogi
 
 @app.route('/')
 def health():
-    return {"status": "Aether-Swarm Active", "session": "Loaded"}
+    return {"status": "Aether-Swarm Active", "live_view": "/live"}
+
+@app.route('/live')
+async def live_view():
+    global global_page
+    if global_page:
+        # Live screenshot lekar browser mein dikhana
+        img_bytes = await global_page.screenshot(type='jpeg', quality=50)
+        return send_file(io.BytesIO(img_bytes), mimetype='image/jpeg')
+    return "⚠️ Browser abhi band hai ya load ho raha hai. Thoda wait karein."
 
 async def swarm_executor():
-    while True:
-        try:
-            print("🧠 Brain (Mistral) is calculating...")
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(storage_state="state.json")
-                page = await context.new_page()
-                
-                # Apply stealth using the universal function
-                await stealth_func(page)
-                
-                await page.goto("https://www.instagram.com/")
-                await asyncio.sleep(5)
-                
-                if await page.query_selector('svg[aria-label="New Post"]'):
-                    print("✅ Logged in successfully!")
-                else:
-                    print("❌ Session issue detected.")
-                
-                await browser.close()
-                
-            await asyncio.sleep(14400) # 4 hours sleep
-            
-        except Exception as e:
-            print(f"⚠️ Swarm Error: {e}")
-            await asyncio.sleep(300)
+    global global_page
+    async with async_playwright() as p:
+        print("🚀 Launching Live Browser...")
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(storage_state="state.json")
+        global_page = await context.new_page()
+        await stealth(global_page)
+        
+        while True:
+            try:
+                print("📸 Monitoring Instagram...")
+                await global_page.goto("https://www.instagram.com/")
+                await asyncio.sleep(60) # Har 1 min mein refresh (testing ke liye)
+            except Exception as e:
+                print(f"⚠️ Error: {e}")
+                await asyncio.sleep(10)
 
 def run_flask():
     port = int(os.environ.get("PORT", 8000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
