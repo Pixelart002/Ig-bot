@@ -1,11 +1,14 @@
 import asyncio
 import os
 import urllib.request
+import base64
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
 
 POST_IMAGE_PATH = "/tmp/ai_post.jpg"
+STREAM_PATH = "/tmp/stream.jpg"
 
+# 🧹 Popups hatane wala code
 async def dismiss_popups(page):
     print("[TASK] 🧹 Clearing popups...", flush=True)
     popups = ["Not Now", "Cancel", "Skip", "Accept"]
@@ -14,13 +17,12 @@ async def dismiss_popups(page):
             btn = page.locator(f"button:has-text('{text}')")
             if await btn.count() > 0:
                 await btn.first.click(timeout=3000, force=True)
-                print(f"✅ Dismissed '{text}'", flush=True)
                 await asyncio.sleep(2)
         except Exception:
             pass
 
 async def browser_logic():
-    print("\n[START] 🚀 Booting Swarm Agent (Advanced 480p Mode)...", flush=True)
+    print("\n[START] 🚀 Booting Swarm Agent (CDP Smooth Bypass Mode)...", flush=True)
     while True:
         try:
             async with async_playwright() as p:
@@ -29,23 +31,44 @@ async def browser_logic():
                     args=[
                         "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", 
                         "--start-maximized", "--disable-blink-features=AutomationControlled",
-                        "--js-flags=--max-old-space-size=128" # Extra RAM Saver
+                        "--js-flags=--max-old-space-size=256" # RAM Limiter
                     ]
                 )
                 
-                storage = "state.json" if os.path.exists("state.json") else None
-                # Screen size matching the new 480p Xvfb
                 context = await browser.new_context(
-                    storage_state=storage, viewport={'width': 854, 'height': 480},
+                    viewport={'width': 854, 'height': 480},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 )
                 context.set_default_timeout(60000)
                 page = await context.new_page()
                 await stealth_async(page)
                 
+                # ==========================================
+                # 🚀 THE MAGIC BYPASS: CDP SCREENCAST
+                # ==========================================
+                client = await context.new_cdp_session(page)
+                
+                async def handle_screencast(event):
+                    try:
+                        # Chrome se seedha frame mila
+                        img_data = base64.b64decode(event["data"])
+                        temp_path = STREAM_PATH + ".tmp"
+                        with open(temp_path, "wb") as f:
+                            f.write(img_data)
+                        os.rename(temp_path, STREAM_PATH)
+                        # Chrome ko bolo agla frame bheje
+                        await client.send("Page.screencastFrameAck", {"sessionId": event["sessionId"]})
+                    except:
+                        pass
+                
+                client.on("Page.screencastFrame", handle_screencast)
+                # Chrome ka internal recorder chalu (Super smooth, 0 extra RAM)
+                await client.send("Page.startScreencast", {"format": "jpeg", "quality": 30, "maxWidth": 854, "maxHeight": 480})
+                # ==========================================
+
                 print("[TASK] 🌐 Navigating to Instagram...", flush=True)
                 await page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
-                await asyncio.sleep(8) 
+                await asyncio.sleep(8)
                 
                 for _ in range(2):
                     await dismiss_popups(page)
@@ -55,7 +78,7 @@ async def browser_logic():
 
                 print("[AI] 🧠 Generating Dummy Image & Caption...", flush=True)
                 urllib.request.urlretrieve("https://picsum.photos/600/600", POST_IMAGE_PATH)
-                ai_caption = "Hello World! 🌍 Uploaded fully autonomously by my AI Swarm Agent. #AI #Bot #Automation"
+                ai_caption = "Hello World! 🌍 Uploaded by my advanced low-RAM Cloud Swarm Agent. #AI #Bot #Automation"
                 await asyncio.sleep(2)
 
                 print("[ACTION] 👉 Clicking 'Create'...", flush=True)
