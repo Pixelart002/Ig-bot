@@ -1,4 +1,4 @@
-flask
+flask[async]
 playwright
 playwright-stealth
 gunicorn
