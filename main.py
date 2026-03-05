@@ -1,13 +1,9 @@
-import asyncio
 import os
-import threading
 import time
-import subprocess
 from flask import Flask, Response
-from playwright.async_api import async_playwright
 
 app = Flask(__name__)
-last_frame = None
+SCREENSHOT_PATH = "/tmp/stream.jpg"
 
 @app.route('/')
 def index():
@@ -43,61 +39,17 @@ def index():
     """
 
 def gen_frames():
-    global last_frame
     while True:
-        if last_frame:
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + last_frame + b'\r\n')
+        try:
+            if os.path.exists(SCREENSHOT_PATH):
+                with open(SCREENSHOT_PATH, 'rb') as f:
+                    frame = f.read()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        except Exception:
+            pass
         time.sleep(0.2)
 
 @app.route('/video_feed')
 def video_feed():
     return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-async def browser_logic():
-    global last_frame
-    print("\n[START] 🚀 Booting Virtual Desktop internally...", flush=True)
-    
-    # Python script ke andar Xvfb start kar rahe hain taaki Gunicorn block na ho
-    os.environ["DISPLAY"] = ":99"
-    subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1280x720x24"])
-    
-    # Wait for Xvfb to start
-    await asyncio.sleep(2)
-    
-    while True:
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=False,
-                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--start-maximized"]
-                )
-                
-                storage = "state.json" if os.path.exists("state.json") else None
-                context = await browser.new_context(
-                    storage_state=storage,
-                    viewport={'width': 1280, 'height': 720}
-                )
-                page = await context.new_page()
-                
-                print("[TASK] 🌐 Navigating to Target...", flush=True)
-                await page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
-                
-                scroll_dir = 1
-                while not page.is_closed():
-                    last_frame = await page.screenshot(type='jpeg', quality=30)
-                    await page.evaluate(f"window.scrollBy(0, {20 * scroll_dir})")
-                    await asyncio.sleep(0.2)
-        except Exception as e:
-            print(f"🛑 [RESTARTING] {str(e)}", flush=True)
-            await asyncio.sleep(5)
-
-def run_browser():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(browser_logic())
-
-threading.Thread(target=run_browser, daemon=True).start()
-
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=8000)
