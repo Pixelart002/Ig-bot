@@ -1,7 +1,6 @@
 import asyncio
 import os
 import threading
-import io
 from flask import Flask, send_file
 from playwright.async_api import async_playwright
 
@@ -11,15 +10,16 @@ except ImportError:
     from playwright_stealth import stealth as stealth_func
 
 app = Flask(__name__)
-global_page = None 
+# Yahan photo save hogi
+SCREENSHOT_PATH = "/workspace/latest_screenshot.jpg"
 
 @app.route('/')
 def health():
-    return {"status": "Swarm Online (Low RAM Mode)", "monitor": "/live"}
+    # Ye page turant khulega
+    return {"status": "Swarm Online - Deadlock Fixed!", "monitor": "/live"}
 
 @app.route('/live')
 def live_video_feed():
-    # 3 second delay to save CPU/RAM on screenshots
     return """
     <html>
         <head>
@@ -33,56 +33,42 @@ def live_video_feed():
         </head>
         <body>
             <div>🔴 LIVE: Instagram Bot Monitor</div>
-            <img src="/screenshot" alt="Waiting for browser..." />
+            <img src="/screenshot" alt="Waiting for bot to click a picture..." />
             <p>Feed auto-refreshes every 3 seconds...</p>
         </body>
     </html>
     """
 
 @app.route('/screenshot')
-async def get_screenshot():
-    global global_page
-    if global_page and not global_page.is_closed():
-        try:
-            # Low quality screenshot to save bandwidth and memory
-            img_bytes = await global_page.screenshot(type='jpeg', quality=30)
-            return send_file(io.BytesIO(img_bytes), mimetype='image/jpeg')
-        except:
-            pass
+def get_screenshot():
+    # Flask sirf hard-disk se photo padhega, bot se baat nahi karega
+    if os.path.exists(SCREENSHOT_PATH):
+        return send_file(SCREENSHOT_PATH, mimetype='image/jpeg')
     return "Not Ready", 404
 
 async def swarm_engine():
-    global global_page
-    print("\n[START] 🚀 Kickstarting Engine (Light Mode)...", flush=True)
-    
+    print("\n[START] 🚀 Bot Engine Started...", flush=True)
     while True:
         try:
             async with async_playwright() as p:
-                print("[TASK 1] 🌐 Launching Headless Chromium...", flush=True)
-                
-                # MEMORY SAVING FLAGS FOR CLOUD
                 browser = await p.chromium.launch(
                     headless=True,
-                    args=[
-                        "--no-sandbox", 
-                        "--disable-setuid-sandbox", 
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu", 
-                        "--single-process", 
-                        "--no-zygote"
-                    ]
+                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
                 )
                 
-                context = await browser.new_context(storage_state="state.json")
-                global_page = await context.new_page()
+                # Check if state.json exists
+                storage = "state.json" if os.path.exists("state.json") else None
+                context = await browser.new_context(storage_state=storage)
+                page = await context.new_page()
                 
                 print("[TASK 2] 📸 Navigating Instagram...", flush=True)
-                await global_page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=60000)
+                await page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=60000)
+                print("✅ [SUCCESS] Eyes on target! Broadcasting to /live", flush=True)
                 
-                print("✅ [SUCCESS] Eyes on target! Go check /live", flush=True)
-                
-                while not global_page.is_closed():
-                    await asyncio.sleep(60)
+                # Bot har 3 second mein photo kheench kar folder mein daalega
+                while not page.is_closed():
+                    await page.screenshot(path=SCREENSHOT_PATH, type='jpeg', quality=30)
+                    await asyncio.sleep(3)
                     
         except Exception as e:
             print(f"🛑 [CRASH] Details: {str(e)}", flush=True)
