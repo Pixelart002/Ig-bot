@@ -2,6 +2,7 @@ import asyncio
 import os
 import threading
 import time
+import subprocess
 from flask import Flask, Response
 from playwright.async_api import async_playwright
 
@@ -32,12 +33,11 @@ def index():
                     <div class="dot" style="background: #ff5f56;"></div>
                     <div class="dot" style="background: #ffbd2e;"></div>
                     <div class="dot" style="background: #27c93f;"></div>
-                    <span style="margin-left: 10px; color: #aaa; font-size: 12px;">Virtual Display :0 - Instagram</span>
+                    <span style="margin-left: 10px; color: #aaa; font-size: 12px;">Virtual Display :99 - Instagram</span>
                 </div>
                 <div class="status">● LIVE</div>
                 <img src="/video_feed" alt="Booting OS environment...">
             </div>
-            <p style="font-size: 12px; color: #666;">Streaming via MJPEG | 5 FPS</p>
         </body>
     </html>
     """
@@ -48,7 +48,6 @@ def gen_frames():
         if last_frame:
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + last_frame + b'\r\n')
-        # 0.2s delay = 5 Frames per second (RAM bachane ke liye perfect)
         time.sleep(0.2)
 
 @app.route('/video_feed')
@@ -57,11 +56,18 @@ def video_feed():
 
 async def browser_logic():
     global last_frame
-    print("\n[START] 🚀 Booting Virtual Desktop...", flush=True)
+    print("\n[START] 🚀 Booting Virtual Desktop internally...", flush=True)
+    
+    # Python script ke andar Xvfb start kar rahe hain taaki Gunicorn block na ho
+    os.environ["DISPLAY"] = ":99"
+    subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1280x720x24"])
+    
+    # Wait for Xvfb to start
+    await asyncio.sleep(2)
+    
     while True:
         try:
             async with async_playwright() as p:
-                # headless=False + Virtual Display = Real Browser!
                 browser = await p.chromium.launch(
                     headless=False,
                     args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--start-maximized"]
@@ -79,10 +85,7 @@ async def browser_logic():
                 
                 scroll_dir = 1
                 while not page.is_closed():
-                    # Har 0.2s me screen capture
-                    last_frame = await page.screenshot(type='jpeg', quality=40)
-                    
-                    # Live dikhane ke liye auto-scroll
+                    last_frame = await page.screenshot(type='jpeg', quality=30)
                     await page.evaluate(f"window.scrollBy(0, {20 * scroll_dir})")
                     await asyncio.sleep(0.2)
         except Exception as e:
@@ -94,7 +97,6 @@ def run_browser():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(browser_logic())
 
-# Gunicorn jaise hi app load karega, ye thread start ho jayega
 threading.Thread(target=run_browser, daemon=True).start()
 
 if __name__ == "__main__":

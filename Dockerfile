@@ -3,7 +3,7 @@ FROM mcr.microsoft.com/playwright:v1.41.0-jammy
 WORKDIR /app
 COPY . /app
 
-# Display aur Pip install
+# Install dependencies
 RUN apt-get update && apt-get install -y \
     python3-pip \
     xvfb \
@@ -16,5 +16,5 @@ RUN playwright install chromium
 
 EXPOSE 8000
 
-# Xvfb ke andar Gunicorn chalayenge taaki health check pass ho jaye
-CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x720x24", "gunicorn", "-b", "0.0.0.0:8000", "--workers", "1", "--threads", "2", "main:app"]
+# Gunicorn seedha start hoga, aur python script ke ANDAR xvfb chalega
+CMD ["gunicorn", "-b", "0.0.0.0:8000", "--workers", "1", "--threads", "2", "main:app"]
