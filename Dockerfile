@@ -1,12 +1,19 @@
-FROM mcr.microsoft.com/playwright/python:v1.58.0-jammy
+FROM mcr.microsoft.com/playwright:v1.41.0-jammy
 
-WORKDIR /workspace
+WORKDIR /app
+COPY . /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Display aur Streaming tools install kar rahe hain
+RUN apt-get update && apt-get install -y \
+    xvfb \
+    fluxbox \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY . .
+RUN pip install --no-cache-dir flask flask[async] playwright playwright-stealth gunicorn
 
-EXPOSE 8000
+# Browser install
+RUN playwright install chromium
 
-CMD ["gunicorn", "-b", "0.0.0.0:8000", "--workers", "1", "--threads", "2", "--worker-class", "gthread", "main:app"]
+# Xvfb Virtual Screen size set kar rahe hain (1280x720)
+CMD ["xvfb-run", "--server-args=-screen 0 1280x720x24", "python", "main.py"]

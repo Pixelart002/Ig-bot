@@ -1,86 +1,89 @@
 import asyncio
 import os
 import threading
-from flask import Flask, send_file
+import time
+from flask import Flask, Response, render_template_string
 from playwright.async_api import async_playwright
 
-try:
-    from playwright_stealth import stealth_async as stealth_func
-except ImportError:
-    from playwright_stealth import stealth as stealth_func
-
 app = Flask(__name__)
-# Yahan photo save hogi
-SCREENSHOT_PATH = "/workspace/latest_screenshot.jpg"
+# Global variable to store the latest frame
+last_frame = None
 
 @app.route('/')
-def health():
-    # Ye page turant khulega
-    return {"status": "Swarm Online - Deadlock Fixed!", "monitor": "/live"}
-
-@app.route('/live')
-def live_video_feed():
+def index():
     return """
     <html>
         <head>
-            <meta http-equiv="refresh" content="3">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>🔴 Live Swarm Feed</title>
+            <title>🔴 Swarm Live OS</title>
             <style>
-                body { background: #111; color: #0f0; font-family: monospace; text-align: center; margin: 0; padding: 20px; }
-                img { max-width: 100%; border: 3px solid #0f0; border-radius: 10px; margin-top: 15px; }
+                body { background: #000; color: #0f0; font-family: 'Courier New', monospace; text-align: center; margin: 0; overflow: hidden; }
+                .stream-container { width: 90vw; margin: 20px auto; border: 4px solid #333; border-radius: 8px; box-shadow: 0 0 30px rgba(0,255,0,0.2); position: relative; }
+                .browser-ui { background: #333; height: 30px; border-top-left-radius: 4px; border-top-right-radius: 4px; display: flex; align-items: center; padding: 0 10px; }
+                .dot { height: 10px; width: 10px; border-radius: 50%; margin-right: 5px; }
+                img { width: 100%; display: block; }
+                .status { position: absolute; top: 40px; right: 20px; background: rgba(0,0,0,0.7); padding: 5px 10px; border-radius: 4px; font-size: 12px; }
             </style>
         </head>
         <body>
-            <div>🔴 LIVE: Instagram Bot Monitor</div>
-            <img src="/screenshot" alt="Waiting for bot to click a picture..." />
-            <p>Feed auto-refreshes every 3 seconds...</p>
+            <h2>SWARM AGENT - LIVE INSTANCE</h2>
+            <div class="stream-container">
+                <div class="browser-ui">
+                    <div class="dot" style="background: #ff5f56;"></div>
+                    <div class="dot" style="background: #ffbd2e;"></div>
+                    <div class="dot" style="background: #27c93f;"></div>
+                    <span style="margin-left: 15px; color: #ccc; font-size: 12px;">Production Browser - Instagram.com</span>
+                </div>
+                <div class="status">● LIVE STREAMING</div>
+                <img src="/video_feed">
+            </div>
+            <p>Direct Virtual Buffer Access | No-Lag Mode</p>
         </body>
     </html>
     """
 
-@app.route('/screenshot')
-def get_screenshot():
-    # Flask sirf hard-disk se photo padhega, bot se baat nahi karega
-    if os.path.exists(SCREENSHOT_PATH):
-        return send_file(SCREENSHOT_PATH, mimetype='image/jpeg')
-    return "Not Ready", 404
-
-async def swarm_engine():
-    print("\n[START] 🚀 Bot Engine Started...", flush=True)
+def gen_frames():
+    global last_frame
     while True:
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
-                )
-                
-                # Check if state.json exists
-                storage = "state.json" if os.path.exists("state.json") else None
-                context = await browser.new_context(storage_state=storage)
-                page = await context.new_page()
-                
-                print("[TASK 2] 📸 Navigating Instagram...", flush=True)
-                await page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=60000)
-                print("✅ [SUCCESS] Eyes on target! Broadcasting to /live", flush=True)
-                
-                # Bot har 3 second mein photo kheench kar folder mein daalega
-                while not page.is_closed():
-                    await page.screenshot(path=SCREENSHOT_PATH, type='jpeg', quality=30)
-                    await asyncio.sleep(3)
-                    
-        except Exception as e:
-            print(f"🛑 [CRASH] Details: {str(e)}", flush=True)
-            await asyncio.sleep(15)
+        if last_frame:
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + last_frame + b'\r\n')
+        time.sleep(0.1) # 10 Frames per second
 
-def start_swarm():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(swarm_engine())
+@app.route('/video_feed')
+def video_feed():
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-threading.Thread(target=start_swarm, daemon=True).start()
+async def browser_logic():
+    global last_frame
+    async with async_playwright() as p:
+        # headless=False is compulsory for full UI
+        browser = await p.chromium.launch(
+            headless=False,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--start-maximized"]
+        )
+        
+        storage = "state.json" if os.path.exists("state.json") else None
+        context = await browser.new_context(
+            storage_state=storage,
+            viewport={'width': 1280, 'height': 720}
+        )
+        
+        page = await context.new_page()
+        await page.goto("https://www.instagram.com/", wait_until="networkidle")
+        
+        print("🚀 STREAM STARTED: Check /")
+
+        while True:
+            # Capturing the full browser window buffer
+            last_frame = await page.screenshot(type='jpeg', quality=50)
+            await asyncio.sleep(0.05) # Super fast capture
+
+def run_browser():
+    asyncio.run(browser_logic())
 
 if __name__ == "__main__":
+    # Start browser in a background thread
+    threading.Thread(target=run_browser, daemon=True).start()
+    # Start Flask
     port = int(os.environ.get("PORT", 8000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, threaded=True)
