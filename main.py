@@ -2,62 +2,55 @@ import asyncio
 import os
 import threading
 import io
-import time
 from flask import Flask, send_file
 from playwright.async_api import async_playwright
-
-try:
-    from playwright_stealth import stealth_async as stealth_func
-except ImportError:
-    from playwright_stealth import stealth as stealth_func
 
 app = Flask(__name__)
 global_page = None 
 
 @app.route('/')
 def health():
-    return {"status": "Dual-Port Active", "ports": [8000, 8080], "engine": "Check /live"}
+    return {"status": "Aether-Swarm Running", "check": "/live"}
 
 @app.route('/live')
 async def live_view():
     global global_page
-    try:
-        if global_page and not global_page.is_closed():
-            img_bytes = await global_page.screenshot(type='jpeg', quality=60)
-            return send_file(io.BytesIO(img_bytes), mimetype='image/jpeg')
-        return "⏳ Waiting for Browser to stabilize... Refresh in 30s.", 202
-    except Exception as e:
-        return f"⚠️ Live View Error: {str(e)}", 500
+    if global_page and not global_page.is_closed():
+        img_bytes = await global_page.screenshot(type='jpeg', quality=60)
+        return send_file(io.BytesIO(img_bytes), mimetype='image/jpeg')
+    return "⏳ Browser is still missing libraries or launching...", 202
 
 async def swarm_engine():
     global global_page
-    print("\n[START] 🚀 Initializing Background Engine...", flush=True)
+    print("\n[START] 🚀 Kickstarting Engine...", flush=True)
     
-    while True: # Auto-restart loop if browser crashes
+    while True:
         try:
             async with async_playwright() as p:
-                print("[TASK 1] 🛠️  Installing Browser Binaries...", flush=True)
+                print("[TASK 1] 🛠️ Ensuring Binaries...", flush=True)
                 os.system("playwright install chromium")
                 
-                print("[TASK 2] 🌐 Launching Chromium Shell...", flush=True)
-                # Added --disable-gpu for extra stability in cloud
-                browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"])
+                print("[TASK 2] 🌐 Launching Chromium...", flush=True)
+                # Added 'disable-setuid-sandbox' for cloud environments
+                browser = await p.chromium.launch(
+                    headless=True, 
+                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                )
                 
                 context = await browser.new_context(storage_state="state.json")
                 global_page = await context.new_page()
-                await stealth_func(global_page)
                 
-                print("[TASK 3] 📸 Loading Instagram...", flush=True)
-                await global_page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
-                print("✅ [ENGINE] Success! Instagram is live.", flush=True)
+                print("[TASK 3] 📸 Navigating Instagram...", flush=True)
+                await global_page.goto("https://www.instagram.com/", wait_until="networkidle")
+                print("✅ [SUCCESS] Swarm is eyes-on-target!", flush=True)
                 
-                while True:
-                    if global_page.is_closed(): break
+                while not global_page.is_closed():
                     await asyncio.sleep(60)
+                    
         except Exception as e:
-            print(f"🛑 [CRASH] Browser failed: {str(e)}", flush=True)
-            print("🔄 [RETRY] Restarting engine in 10 seconds...", flush=True)
-            await asyncio.sleep(10)
+            print(f"🛑 [CRASH] Details: {str(e)}", flush=True)
+            print("🔄 [RETRY] Restarting in 15 seconds...", flush=True)
+            await asyncio.sleep(15)
 
 def start_swarm():
     loop = asyncio.new_event_loop()
