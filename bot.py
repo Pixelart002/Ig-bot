@@ -8,7 +8,6 @@ from playwright_stealth import stealth_async
 POST_IMAGE_PATH = "/tmp/ai_post.jpg"
 STREAM_PATH = "/tmp/stream.jpg"
 
-# 🧹 Popups hatane wala code
 async def dismiss_popups(page):
     print("[TASK] 🧹 Clearing popups...", flush=True)
     popups = ["Not Now", "Cancel", "Skip", "Accept"]
@@ -22,7 +21,7 @@ async def dismiss_popups(page):
             pass
 
 async def browser_logic():
-    print("\n[START] 🚀 Booting Swarm Agent (CDP Smooth Bypass Mode)...", flush=True)
+    print("\n[START] 🚀 Booting Swarm Agent (Low-RAM CDP Mode)...", flush=True)
     while True:
         try:
             async with async_playwright() as p:
@@ -31,7 +30,7 @@ async def browser_logic():
                     args=[
                         "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", 
                         "--start-maximized", "--disable-blink-features=AutomationControlled",
-                        "--js-flags=--max-old-space-size=256" # RAM Limiter
+                        "--js-flags=--max-old-space-size=200", "--disable-gpu"
                     ]
                 )
                 
@@ -43,29 +42,23 @@ async def browser_logic():
                 page = await context.new_page()
                 await stealth_async(page)
                 
-                # ==========================================
-                # 🚀 THE MAGIC BYPASS: CDP SCREENCAST
-                # ==========================================
+                # CDP SCREENCAST (Zero extra RAM Video Stream)
                 client = await context.new_cdp_session(page)
-                
                 async def handle_screencast(event):
                     try:
-                        # Chrome se seedha frame mila
                         img_data = base64.b64decode(event["data"])
                         temp_path = STREAM_PATH + ".tmp"
                         with open(temp_path, "wb") as f:
                             f.write(img_data)
                         os.rename(temp_path, STREAM_PATH)
-                        # Chrome ko bolo agla frame bheje
                         await client.send("Page.screencastFrameAck", {"sessionId": event["sessionId"]})
                     except:
                         pass
                 
                 client.on("Page.screencastFrame", handle_screencast)
-                # Chrome ka internal recorder chalu (Super smooth, 0 extra RAM)
-                await client.send("Page.startScreencast", {"format": "jpeg", "quality": 30, "maxWidth": 854, "maxHeight": 480})
-                # ==========================================
-
+                await client.send("Page.startScreencast", {"format": "jpeg", "quality": 20, "maxWidth": 854, "maxHeight": 480})
+                
+                # --- PRD LOGIC ---
                 print("[TASK] 🌐 Navigating to Instagram...", flush=True)
                 await page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
                 await asyncio.sleep(8)
@@ -78,7 +71,7 @@ async def browser_logic():
 
                 print("[AI] 🧠 Generating Dummy Image & Caption...", flush=True)
                 urllib.request.urlretrieve("https://picsum.photos/600/600", POST_IMAGE_PATH)
-                ai_caption = "Hello World! 🌍 Uploaded by my advanced low-RAM Cloud Swarm Agent. #AI #Bot #Automation"
+                ai_caption = "Hello World! 🌍 Uploaded fully autonomously by my AI Swarm Agent running on 512MB RAM! #AI #Bot #Automation"
                 await asyncio.sleep(2)
 
                 print("[ACTION] 👉 Clicking 'Create'...", flush=True)
@@ -107,7 +100,7 @@ async def browser_logic():
                 print("[ACTION] 🚀 Clicking SHARE!", flush=True)
                 await page.get_by_text("Share").click()
                 
-                print("[WAIT] ⏳ Waiting for upload to complete...", flush=True)
+                print("[WAIT] ⏳ Waiting for upload...", flush=True)
                 await page.get_by_text("Your post has been shared.").wait_for(timeout=30000)
                 print("🎉 [SUCCESS] POST IS LIVE!", flush=True)
                 

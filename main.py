@@ -10,7 +10,7 @@ def index():
     return """
     <html>
         <head>
-            <title>🔴 Swarm OS (CDP Smooth Bypass)</title>
+            <title>🔴 Swarm Live OS</title>
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <style>
                 body { background: #000; color: #0f0; font-family: 'Courier New', monospace; text-align: center; margin: 0; padding: 10px; }
@@ -23,13 +23,13 @@ def index():
             </style>
         </head>
         <body>
-            <h3>🧠 MANUS-AGENT: CDP VIDEO BYPASS</h3>
+            <h3>🧠 MANUS-AGENT: ACTIVE</h3>
             <div class="stream-container">
                 <div class="browser-ui">
                     <div class="dot" style="background: #ff5f56;"></div>
                     <div class="dot" style="background: #ffbd2e;"></div>
                     <div class="dot" style="background: #27c93f;"></div>
-                    <span style="margin-left: 10px; color: #aaa; font-size: 12px;">512MB RAM Optimized Stream</span>
+                    <span style="margin-left: 10px; color: #aaa; font-size: 12px;">512MB RAM | Free Tier Tuned</span>
                 </div>
                 <div class="status">● LIVE</div>
                 <img src="/video_feed" alt="Booting OS environment...">
@@ -48,8 +48,7 @@ def gen_frames():
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
         except Exception:
             pass
-        # 0.05s delay = 20 FPS capability
-        time.sleep(0.05)
+        time.sleep(0.1)
 
 @app.route('/video_feed')
 def video_feed():
