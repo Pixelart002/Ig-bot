@@ -20,7 +20,7 @@ async def dismiss_popups(page):
             pass
 
 async def browser_logic():
-    print("\n[START] 🚀 Booting Swarm Agent (HLS Optimized Mode)...", flush=True)
+    print("\n[START] 🚀 Booting Swarm Agent (Advanced 480p Mode)...", flush=True)
     while True:
         try:
             async with async_playwright() as p:
@@ -28,13 +28,15 @@ async def browser_logic():
                     headless=False,
                     args=[
                         "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", 
-                        "--start-maximized", "--disable-blink-features=AutomationControlled"
+                        "--start-maximized", "--disable-blink-features=AutomationControlled",
+                        "--js-flags=--max-old-space-size=128" # Extra RAM Saver
                     ]
                 )
                 
                 storage = "state.json" if os.path.exists("state.json") else None
+                # Screen size matching the new 480p Xvfb
                 context = await browser.new_context(
-                    storage_state=storage, viewport={'width': 1280, 'height': 720},
+                    storage_state=storage, viewport={'width': 854, 'height': 480},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 )
                 context.set_default_timeout(60000)
@@ -52,7 +54,7 @@ async def browser_logic():
                 await asyncio.sleep(3)
 
                 print("[AI] 🧠 Generating Dummy Image & Caption...", flush=True)
-                urllib.request.urlretrieve("https://picsum.photos/800/800", POST_IMAGE_PATH)
+                urllib.request.urlretrieve("https://picsum.photos/600/600", POST_IMAGE_PATH)
                 ai_caption = "Hello World! 🌍 Uploaded fully autonomously by my AI Swarm Agent. #AI #Bot #Automation"
                 await asyncio.sleep(2)
 

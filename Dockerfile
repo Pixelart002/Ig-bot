@@ -3,7 +3,7 @@ FROM mcr.microsoft.com/playwright:v1.41.0-jammy
 WORKDIR /app
 COPY . /app
 
-# FFmpeg install kar rahe hain for YouTube-style HLS streaming
+# FFmpeg for advanced HLS streaming
 RUN apt-get update && apt-get install -y \
     python3-pip \
     xvfb \
@@ -17,4 +17,5 @@ RUN playwright install chromium
 RUN mkdir -p /app/static/hls
 EXPOSE 8000
 
+RUN chmod +x start.sh
 CMD ["bash", "start.sh"]
