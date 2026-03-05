@@ -3,19 +3,18 @@ FROM mcr.microsoft.com/playwright:v1.41.0-jammy
 WORKDIR /app
 COPY . /app
 
-# Python, Pip, Display aur Streaming tools install kar rahe hain
+# Display aur Pip install
 RUN apt-get update && apt-get install -y \
     python3-pip \
     xvfb \
     fluxbox \
-    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Pip ko use karke requirements install karna
-RUN pip3 install --no-cache-dir flask flask[async] playwright playwright-stealth gunicorn
+RUN pip3 install --no-cache-dir flask playwright playwright-stealth gunicorn
 
-# Browser install
 RUN playwright install chromium
 
-# Xvfb Virtual Screen size set kar rahe hain (1280x720)
-CMD ["xvfb-run", "--server-args=-screen 0 1280x720x24", "python3", "main.py"]
+EXPOSE 8000
+
+# Xvfb ke andar Gunicorn chalayenge taaki health check pass ho jaye
+CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x720x24", "gunicorn", "-b", "0.0.0.0:8000", "--workers", "1", "--threads", "2", "main:app"]
