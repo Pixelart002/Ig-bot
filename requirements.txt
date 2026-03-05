@@ -1,5 +1,5 @@
-flask[async]
-requests
+flask
 playwright
 playwright-stealth
 gunicorn
+requests
