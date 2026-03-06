@@ -1,149 +1,123 @@
-import asyncio
-import os
-import urllib.request
-import urllib.parse
-import base64
-import json
-import time
+cat << 'EOF' > bot.py
+import asyncio, os, urllib.request, json, time, base64
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
 
-POST_IMAGE_PATH = "/tmp/ai_post.jpg"
-STREAM_PATH = "/tmp/stream.jpg"
-
-# 🔴 AAPKA PRIVATE AI SETUP
+# CONFIG
 HF_TOKEN = "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"
 OLLAMA_URL = "https://vivekkumarr-my-ai.hf.space/api/generate"
+LOG_PATH = "/tmp/swarm_logic.txt"
+STREAM_PATH = "/tmp/stream.jpg"
+INST_PATH = "instructions.txt"
 
-# ==========================================
-# 🧠 SWARM NEURAL NETWORK (QWEN + FLUX)
-# ==========================================
-def generate_ai_content():
-    print("[SWARM-AI] 🧠 Brain working in background...", flush=True)
-    try:
-        prompt = "A stunning futuristic cyberpunk city with glowing neon lights, 8k resolution, highly detailed"
-        encoded_prompt = urllib.parse.quote(prompt)
-        timestamp = int(time.time() * 1000)
-        flux_url = f"https://flux-schnell.hello-kaiiddo.workers.dev/img?prompt={encoded_prompt}&t={timestamp}"
+def swarm_log(msg):
+    print(f"[MANUS] {msg}", flush=True)
+    with open(LOG_PATH, "a") as f: f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
 
-        req = urllib.request.Request(flux_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=30) as response:
-            with open(POST_IMAGE_PATH, "wb") as f:
-                f.write(response.read())
-    except:
-        urllib.request.urlretrieve("https://picsum.photos/600/600", POST_IMAGE_PATH)
+async def get_dom_map(page):
+    """Extracts interactive elements for the AI to 'see' the page structure"""
+    return await page.evaluate("""
+        () => {
+            const items = [];
+            const interactive = document.querySelectorAll('button, a, input, [role="button"], textarea');
+            interactive.forEach((el, i) => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    items.append({
+                        id: i,
+                        tag: el.tagName,
+                        text: el.innerText || el.getAttribute('aria-label') || el.placeholder || '',
+                        x: rect.x + rect.width/2,
+                        y: rect.y + rect.height/2
+                    });
+                }
+            });
+            return items.slice(0, 30); // Limit to 30 elements for AI context
+        }
+    """)
 
-    caption = ""
-    try:
-        payload = {"model": "qwen2.5-coder:7b", "prompt": "Write a 2-line cool Instagram caption for a cyberpunk city image. Include 3 hashtags. No quotes.", "stream": False}
-        req = urllib.request.Request(OLLAMA_URL, data=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {HF_TOKEN}'})
-        with urllib.request.urlopen(req, timeout=30) as response:
-            res_json = json.loads(response.read().decode('utf-8'))
-            caption = res_json.get('response', '').strip().strip('"').strip("'")
-    except:
-        caption = "Lost in the neon glow of tomorrow. 🌃✨ #Cyberpunk #FutureCity"
+async def think_and_act(page, goal):
+    dom_elements = await get_dom_map(page)
+    url = page.url
     
-    print("✅ [SWARM-AI] Content Ready!", flush=True)
-    return caption
+    prompt = f"""
+    GOAL: {goal}
+    CURRENT URL: {url}
+    PAGE ELEMENTS: {json.dumps(dom_elements)}
+    
+    You are an autonomous browser agent. Based on the elements and the goal, decide the next action.
+    Respond ONLY in JSON format:
+    {{"action": "click", "x": 100, "y": 200, "thought": "Reasoning here"}}
+    OR
+    {{"action": "type", "text": "hello", "x": 100, "y": 200, "thought": "Reasoning here"}}
+    OR
+    {{"action": "navigate", "url": "https://...", "thought": "Reasoning here"}}
+    OR
+    {{"action": "finish", "thought": "Goal achieved"}}
+    """
 
-# ==========================================
-# ⚡ TURBO BROWSER ENGINE
-# ==========================================
-async def block_heavy_resources(route):
-    # Block videos, fonts, and heavy tracking to speed up loading 5x
-    if route.request.resource_type in ["media", "font"]:
-        await route.abort()
-    else:
-        await route.continue_()
+    try:
+        payload = {"model": "qwen2.5-coder:7b", "prompt": prompt, "stream": False}
+        req = urllib.request.Request(OLLAMA_URL, data=json.dumps(payload).encode('utf-8'), 
+                                    headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {HF_TOKEN}'})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            res = json.loads(r.read().decode('utf-8'))
+            decision = json.loads(res.get('response', '{}'))
+            
+            swarm_log(f"🧠 THOUGHT: {decision.get('thought')}")
+            
+            action = decision.get('action')
+            if action == 'click':
+                await page.mouse.click(decision['x'], decision['y'])
+            elif action == 'type':
+                await page.mouse.click(decision['x'], decision['y'])
+                await page.keyboard.type(decision['text'])
+                await page.keyboard.press("Enter")
+            elif action == 'navigate':
+                await page.goto(decision['url'])
+            elif action == 'finish':
+                swarm_log("🎯 GOAL ACHIEVED!")
+                return True
+    except Exception as e:
+        swarm_log(f"🛑 Error in thinking: {e}")
+    return False
 
 async def browser_logic():
-    print("\n[START] 🚀 Booting Swarm Agent (TURBO MODE)...", flush=True)
-    while True:
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=False,
-                    args=[
-                        "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", 
-                        "--start-maximized", "--disable-blink-features=AutomationControlled",
-                        "--js-flags=--max-old-space-size=200", "--disable-gpu"
-                    ]
-                )
-                
-                # 🔥 STATE.JSON LOADED: Instant Login Bypass
-                context_args = {
-                    "viewport": {'width': 1024, 'height': 768},
-                    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                }
-                if os.path.exists("state.json"):
-                    context_args["storage_state"] = "state.json"
+    swarm_log("🚀 MANUS AGENT INITIALIZING...")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False, args=["--no-sandbox"])
+        context = await browser.new_context(viewport={'width': 1280, 'height': 800})
+        if os.path.exists("state.json"): context.storage_state = "state.json"
+        page = await context.new_page()
+        await stealth_async(page)
+
+        # Screencast for Dashboard Preview
+        client = await context.new_cdp_session(page)
+        async def handle_screencast(event):
+            with open(STREAM_PATH, "wb") as f: f.write(base64.b64decode(event["data"]))
+            await client.send("Page.screencastFrameAck", {"sessionId": event["sessionId"]})
+        client.on("Page.screencastFrame", handle_screencast)
+        await client.send("Page.startScreencast", {"format": "jpeg", "quality": 15})
+
+        while True:
+            if os.path.exists(INST_PATH):
+                with open(INST_PATH, 'r') as f: goal = f.read().strip()
+                if goal:
+                    swarm_log(f"🎯 NEW GOAL DETECTED: {goal}")
+                    # Navigate to start if it's a new goal
+                    if "instagram.com" not in page.url and "google" not in page.url:
+                        await page.goto("https://www.google.com")
                     
-                context = await browser.new_context(**context_args)
-                context.set_default_timeout(30000)
-                page = await context.new_page()
-                await stealth_async(page)
-                
-                # Activate Turbo Network Interceptor
-                await page.route("**/*", block_heavy_resources)
-                
-                # CDP SCREENCAST (Low impact)
-                client = await context.new_cdp_session(page)
-                async def handle_screencast(event):
-                    try:
-                        temp_path = STREAM_PATH + ".tmp"
-                        with open(temp_path, "wb") as f:
-                            f.write(base64.b64decode(event["data"]))
-                        os.rename(temp_path, STREAM_PATH)
-                        await client.send("Page.screencastFrameAck", {"sessionId": event["sessionId"]})
-                    except: pass
-                client.on("Page.screencastFrame", handle_screencast)
-                await client.send("Page.startScreencast", {"format": "jpeg", "quality": 10, "maxWidth": 854, "maxHeight": 480})
-                
-                # ⚡ PARALLEL EXECUTION: Start AI generation & Page load at the SAME TIME
-                print("[TASK] 🌐 Loading Instagram & AI Brain simultaneously...", flush=True)
-                ai_task = asyncio.create_task(asyncio.to_thread(generate_ai_content))
-                
-                await page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
-                
-                # Wait for main UI to render
-                await page.locator("svg[aria-label='Home']").first.wait_for(state="visible", timeout=45000)
-                
-                # Await AI task just in case it's not done yet
-                ai_caption = await ai_task
-
-                print("✅ Feed & AI Ready! Executing Blitzkrieg Post...", flush=True)
-
-                print("[ACTION] 👉 Clicking 'Create'...", flush=True)
-                await page.locator("svg[aria-label='New post']").first.click()
-                
-                print("[ACTION] 📂 Uploading Image...", flush=True)
-                async with page.expect_file_chooser() as fc_info:
-                    await page.get_by_role("button", name="Select from computer").click()
-                await (await fc_info.value).set_files(POST_IMAGE_PATH)
-
-                print("[ACTION] 👉 Speed-Clicking Next...", flush=True)
-                await page.get_by_role("button", name="Next").click()
-                await asyncio.sleep(0.5) # Micro-delay for UI transition
-                await page.get_by_role("button", name="Next").click()
-
-                print("[ACTION] ✍️ Typing Caption...", flush=True)
-                # Fill is instant compared to typing letter by letter
-                await page.get_by_role("textbox", name="Write a caption...").fill(ai_caption)
-
-                print("[ACTION] 🚀 Clicking SHARE!", flush=True)
-                await page.get_by_role("button", name="Share").click()
-                
-                print("[WAIT] ⏳ Waiting for upload confirmation...", flush=True)
-                await page.get_by_text("Your post has been shared.").wait_for(timeout=30000)
-                print("🎉 [SUCCESS] POST IS LIVE!", flush=True)
-                
-                print("[IDLE] 💤 Swarm resting...", flush=True)
-                while not page.is_closed():
-                    await asyncio.sleep(20)
+                    # Observe-Think-Act Loop
+                    for _ in range(15): # Max 15 steps per goal
+                        done = await think_and_act(page, goal)
+                        if done: break
+                        await asyncio.sleep(3)
                     
-        except Exception as e:
-            print(f"🛑 [SWARM CRASH] {str(e)}", flush=True)
-            await asyncio.sleep(3)
+                    # Clear goal after finishing
+                    os.remove(INST_PATH)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(browser_logic())
+EOF
