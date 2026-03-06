@@ -15,7 +15,6 @@ def swarm_log(msg):
 
 async def get_dom_map(page):
     try:
-        # 🟢 Yahan .push() use hua hai, .append() nahi!
         return await page.evaluate("""
             () => {
                 const items = [];
@@ -43,18 +42,20 @@ async def think_and_act(page, goal):
     dom_elements = await get_dom_map(page)
     url = page.url
     
+    # AI Prompt updated to instruct it to navigate dynamically
     prompt = f"""
     GOAL: {goal}
     CURRENT URL: {url}
     PAGE ELEMENTS: {json.dumps(dom_elements)}
     
-    You are an autonomous browser agent. Decide the next action based on elements.
-    Respond ONLY in valid JSON:
+    You are an autonomous browser agent. Decide the next action based on elements and the goal.
+    If the goal implies visiting a specific website, your first action MUST be to navigate there.
+    Respond ONLY in valid JSON format exactly like this:
     {{"action": "click", "x": 100, "y": 200, "thought": "Reasoning here"}}
     OR
     {{"action": "type", "text": "hello", "x": 100, "y": 200, "thought": "Reasoning here"}}
     OR
-    {{"action": "navigate", "url": "https://...", "thought": "Reasoning here"}}
+    {{"action": "navigate", "url": "https://example.com", "thought": "Reasoning here"}}
     OR
     {{"action": "finish", "thought": "Goal achieved"}}
     """
@@ -67,8 +68,11 @@ async def think_and_act(page, goal):
             res_raw = r.read().decode('utf-8')
             res = json.loads(res_raw)
             clean_res = res.get('response', '{}').strip()
+            # Clean up markdown if AI sends it
             if "```json" in clean_res:
                 clean_res = clean_res.split("```json")[1].split("```")[0].strip()
+            elif "```" in clean_res:
+                clean_res = clean_res.split("```")[1].strip()
             
             decision = json.loads(clean_res)
             swarm_log(f"🧠 THOUGHT: {decision.get('thought')}")
@@ -81,6 +85,7 @@ async def think_and_act(page, goal):
                 await page.keyboard.type(decision['text'])
                 await page.keyboard.press("Enter")
             elif action == 'navigate':
+                swarm_log(f"🌐 Navigating to URL: {decision['url']}")
                 await page.goto(decision['url'])
             elif action == 'finish':
                 swarm_log("🎯 GOAL ACHIEVED!")
@@ -106,14 +111,18 @@ async def browser_logic():
         client.on("Page.screencastFrame", handle_screencast)
         await client.send("Page.startScreencast", {"format": "jpeg", "quality": 15})
 
+        # ✅ Default start page (Clean URL, completely outside the task loop)
+        swarm_log("🌐 Opening default browser page...")
+        await page.goto("[https://www.google.com](https://www.google.com)")
+
         while True:
             if os.path.exists(INST_PATH):
                 with open(INST_PATH, 'r') as f: goal = f.read().strip()
                 if goal:
                     swarm_log(f"🎯 NEW GOAL DETECTED: {goal}")
-                    if "http" not in page.url: 
-                        await page.goto("[https://www.google.com](https://www.google.com)")
                     
+                    # ✅ Removed hardcoded Google navigation from here. 
+                    # The AI will decide to navigate based on the prompt.
                     for _ in range(15):
                         done = await think_and_act(page, goal)
                         if done: break
