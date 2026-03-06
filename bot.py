@@ -37,12 +37,12 @@ async def get_dom_map(page):
                         });
                     }
                 });
-                // 🔥 TOP 10 ITEMS ONLY
+                // 🔥 TOP 10 ITEMS ONLY (Memory bachane ke liye)
                 return items.slice(0, 10);
             }
         """)
     except Exception as e:
-        swarm_log(f"⚠️ DOM Mapping issue: {e}")
+        swarm_log(f"⚠️ DOM Mapping mein dikkat: {e}")
         return []
 
 async def think_and_act(page, goal):
@@ -54,7 +54,7 @@ async def think_and_act(page, goal):
 Respond ONLY in JSON format: {{"action": "click/type/navigate/finish", "x": 0, "y": 0, "text": "", "url": "", "thought": "Short reason"}}"""
 
     try:
-        # 🔥 Added options.num_ctx to unlock full 32K context limit for Qwen 1.5B
+        # 🔥 Stream: True rakha hai aur Context Window 32K hai
         payload = {
             "model": "qwen2.5-coder:1.5b", 
             "prompt": prompt, 
@@ -64,7 +64,7 @@ Respond ONLY in JSON format: {{"action": "click/type/navigate/finish", "x": 0, "
             }
         }
         
-        # 🔥 Explicitly defined method='POST' just to be 100% safe
+        # 🔥 POST request bhej rahe hain
         req = urllib.request.Request(
             OLLAMA_URL, 
             data=json.dumps(payload).encode('utf-8'), 
@@ -72,40 +72,63 @@ Respond ONLY in JSON format: {{"action": "click/type/navigate/finish", "x": 0, "
             method='POST'
         )
         
-        # Timeout 120s kiya hai, par short prompt ki wajah se reply 20s mein aa jayega
+        full_response = ""
+        
+        # Stream padhne ka naya tareeqa
         with urllib.request.urlopen(req, timeout=120) as r:
-            res_raw = r.read().decode('utf-8')
-            res = json.loads(res_raw)
-            clean_res = res.get('response', '{}').strip()
+            for line in r:
+                line = line.decode('utf-8').strip()
+                if line:
+                    try:
+                        # Har ek tukde ko alag parse karenge
+                        chunk = json.loads(line)
+                        if 'response' in chunk:
+                            full_response += chunk['response']
+                    except Exception as parse_err:
+                        # Agar koi line kharab aati hai toh ignore kardo
+                        pass
+        
+        clean_res = full_response.strip()
+        
+        # Markdown parser fallback
+        if "```json" in clean_res:
+            clean_res = clean_res.split("```json")[1].split("```")[0].strip()
+        elif "```" in clean_res:
+            clean_res = clean_res.split("```")[1].strip()
+        
+        # 🟢 Ultimate JSON Extractor: Faltu baaton ko hata do
+        start_idx = clean_res.find('{')
+        end_idx = clean_res.rfind('}') + 1
+        
+        if start_idx != -1 and end_idx != 0:
+            clean_res = clean_res[start_idx:end_idx]
+        else:
+            clean_res = '{}'
+        
+        decision = json.loads(clean_res)
+        swarm_log(f"🧠 Soch: {decision.get('thought', 'Action le raha hoon...')}")
+        
+        action = decision.get('action')
+        if action == 'click':
+            await page.mouse.click(decision['x'], decision['y'])
+        elif action == 'type':
+            await page.mouse.click(decision['x'], decision['y'])
+            await page.keyboard.type(decision['text'])
+            await page.keyboard.press("Enter")
+        elif action == 'navigate':
+            swarm_log(f"🌐 Naye URL par jaa rahe hain: {decision['url']}")
+            await page.goto(decision['url'])
+        elif action == 'finish':
+            swarm_log("🎯 KAAM POORA HO GAYA!")
+            return True
             
-            # Markdown parser fallback
-            if "```json" in clean_res:
-                clean_res = clean_res.split("```json")[1].split("```")[0].strip()
-            elif "```" in clean_res:
-                clean_res = clean_res.split("```")[1].strip()
-            
-            decision = json.loads(clean_res)
-            swarm_log(f"🧠 {decision.get('thought', 'Acting...')}")
-            
-            action = decision.get('action')
-            if action == 'click':
-                await page.mouse.click(decision['x'], decision['y'])
-            elif action == 'type':
-                await page.mouse.click(decision['x'], decision['y'])
-                await page.keyboard.type(decision['text'])
-                await page.keyboard.press("Enter")
-            elif action == 'navigate':
-                swarm_log(f"🌐 Navigating to URL: {decision['url']}")
-                await page.goto(decision['url'])
-            elif action == 'finish':
-                swarm_log("🎯 GOAL ACHIEVED!")
-                return True
     except Exception as e:
-        swarm_log(f"🛑 Decision Error: {e}")
+        swarm_log(f"🛑 Faisla lene mein Error: {e}")
+        
     return False
 
 async def browser_logic():
-    swarm_log("🚀 MANUS AGENT INITIALIZING...")
+    swarm_log("🚀 MANUS AGENT START HO RAHA HAI...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False, args=["--no-sandbox"])
         context = await browser.new_context(viewport={'width': 1280, 'height': 800})
@@ -121,14 +144,14 @@ async def browser_logic():
         client.on("Page.screencastFrame", handle_screencast)
         await client.send("Page.startScreencast", {"format": "jpeg", "quality": 15})
 
-        swarm_log("🌐 Opening default browser page...")
+        swarm_log("🌐 Default browser page khol rahe hain...")
         await page.goto(DEFAULT_URL)
 
         while True:
             if os.path.exists(INST_PATH):
                 with open(INST_PATH, 'r') as f: goal = f.read().strip()
                 if goal:
-                    swarm_log(f"🎯 NEW GOAL DETECTED: {goal}")
+                    swarm_log(f"🎯 NAYA GOAL MILA: {goal}")
                     for _ in range(15):
                         done = await think_and_act(page, goal)
                         if done: break
