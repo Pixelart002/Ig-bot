@@ -1,4 +1,4 @@
-
+cat << 'EOF' > bot.py
 import asyncio, os, urllib.request, json, time, base64
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
@@ -15,26 +15,30 @@ def swarm_log(msg):
     with open(LOG_PATH, "a") as f: f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
 
 async def get_dom_map(page):
-    """Extracts interactive elements for the AI to 'see' the page structure"""
-    return await page.evaluate("""
-        () => {
-            const items = [];
-            const interactive = document.querySelectorAll('button, a, input, [role="button"], textarea');
-            interactive.forEach((el, i) => {
-                const rect = el.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) {
-                    items.append({
-                        id: i,
-                        tag: el.tagName,
-                        text: el.innerText || el.getAttribute('aria-label') || el.placeholder || '',
-                        x: rect.x + rect.width/2,
-                        y: rect.y + rect.height/2
-                    });
-                }
-            });
-            return items.slice(0, 30); // Limit to 30 elements for AI context
-        }
-    """)
+    try:
+        # 🟢 Yahan .push() use hua hai, .append() nahi!
+        return await page.evaluate("""
+            () => {
+                const items = [];
+                const interactive = document.querySelectorAll('button, a, input, [role="button"], textarea');
+                interactive.forEach((el, i) => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        items.push({ 
+                            id: i,
+                            tag: el.tagName,
+                            text: el.innerText || el.getAttribute('aria-label') || el.placeholder || '',
+                            x: rect.x + rect.width/2,
+                            y: rect.y + rect.height/2
+                        });
+                    }
+                });
+                return items.slice(0, 30);
+            }
+        """)
+    except Exception as e:
+        swarm_log(f"⚠️ DOM Mapping issue: {e}")
+        return []
 
 async def think_and_act(page, goal):
     dom_elements = await get_dom_map(page)
@@ -45,8 +49,8 @@ async def think_and_act(page, goal):
     CURRENT URL: {url}
     PAGE ELEMENTS: {json.dumps(dom_elements)}
     
-    You are an autonomous browser agent. Based on the elements and the goal, decide the next action.
-    Respond ONLY in JSON format:
+    You are an autonomous browser agent. Decide the next action based on elements.
+    Respond ONLY in valid JSON:
     {{"action": "click", "x": 100, "y": 200, "thought": "Reasoning here"}}
     OR
     {{"action": "type", "text": "hello", "x": 100, "y": 200, "thought": "Reasoning here"}}
@@ -61,9 +65,13 @@ async def think_and_act(page, goal):
         req = urllib.request.Request(OLLAMA_URL, data=json.dumps(payload).encode('utf-8'), 
                                     headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {HF_TOKEN}'})
         with urllib.request.urlopen(req, timeout=60) as r:
-            res = json.loads(r.read().decode('utf-8'))
-            decision = json.loads(res.get('response', '{}'))
+            res_raw = r.read().decode('utf-8')
+            res = json.loads(res_raw)
+            clean_res = res.get('response', '{}').strip()
+            if "```json" in clean_res:
+                clean_res = clean_res.split("```json")[1].split("```")[0].strip()
             
+            decision = json.loads(clean_res)
             swarm_log(f"🧠 THOUGHT: {decision.get('thought')}")
             
             action = decision.get('action')
@@ -79,7 +87,7 @@ async def think_and_act(page, goal):
                 swarm_log("🎯 GOAL ACHIEVED!")
                 return True
     except Exception as e:
-        swarm_log(f"🛑 Error in thinking: {e}")
+        swarm_log(f"🛑 Decision Error: {e}")
     return False
 
 async def browser_logic():
@@ -87,15 +95,15 @@ async def browser_logic():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False, args=["--no-sandbox"])
         context = await browser.new_context(viewport={'width': 1280, 'height': 800})
-        if os.path.exists("state.json"): context.storage_state = "state.json"
         page = await context.new_page()
         await stealth_async(page)
 
-        # Screencast for Dashboard Preview
         client = await context.new_cdp_session(page)
         async def handle_screencast(event):
-            with open(STREAM_PATH, "wb") as f: f.write(base64.b64decode(event["data"]))
-            await client.send("Page.screencastFrameAck", {"sessionId": event["sessionId"]})
+            try:
+                with open(STREAM_PATH, "wb") as f: f.write(base64.b64decode(event["data"]))
+                await client.send("Page.screencastFrameAck", {"sessionId": event["sessionId"]})
+            except: pass
         client.on("Page.screencastFrame", handle_screencast)
         await client.send("Page.startScreencast", {"format": "jpeg", "quality": 15})
 
@@ -104,19 +112,17 @@ async def browser_logic():
                 with open(INST_PATH, 'r') as f: goal = f.read().strip()
                 if goal:
                     swarm_log(f"🎯 NEW GOAL DETECTED: {goal}")
-                    # Navigate to start if it's a new goal
-                    if "instagram.com" not in page.url and "google" not in page.url:
-                        await page.goto("https://www.google.com")
+                    if "http" not in page.url: 
+                        await page.goto("[https://www.google.com](https://www.google.com)")
                     
-                    # Observe-Think-Act Loop
-                    for _ in range(15): # Max 15 steps per goal
+                    for _ in range(15):
                         done = await think_and_act(page, goal)
                         if done: break
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(4)
                     
-                    # Clear goal after finishing
-                    os.remove(INST_PATH)
+                    if os.path.exists(INST_PATH): os.remove(INST_PATH)
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(browser_logic())
+EOF
