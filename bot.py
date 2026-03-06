@@ -1,4 +1,3 @@
-cat << 'EOF' > bot.py
 import asyncio, os, urllib.request, json, time, base64
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
@@ -120,4 +119,3 @@ async def browser_logic():
 
 if __name__ == "__main__":
     asyncio.run(browser_logic())
-EOF

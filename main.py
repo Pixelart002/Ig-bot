@@ -1,4 +1,3 @@
-cat << 'EOF' > main.py
 import os, time
 from flask import Flask, Response, request, render_template_string
 
@@ -115,4 +114,3 @@ def video_feed():
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=8000)
-EOF
