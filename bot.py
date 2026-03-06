@@ -54,7 +54,7 @@ async def think_and_act(page, goal):
 Respond ONLY in JSON format: {{"action": "click/type/navigate/finish", "x": 0, "y": 0, "text": "", "url": "", "thought": "Short reason"}}"""
 
     try:
-        payload = {"model": "qwen2.5-coder:7b", "prompt": prompt, "stream": False}
+        payload = {"model": "qwen2.5-coder:1.5b", "prompt": prompt, "stream": False}
         req = urllib.request.Request(OLLAMA_URL, data=json.dumps(payload).encode('utf-8'), 
                                     headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {HF_TOKEN}'})
         
