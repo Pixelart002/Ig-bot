@@ -16,11 +16,12 @@ def swarm_log(msg):
     print(f"[MANUS] {msg}", flush=True)
     with open(LOG_PATH, "a") as f: f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
 
-# 🟢 AI request ko background thread me chalane ke liye
-def fetch_ai_decision_sync(prompt):
+# 🟢 AI request ko background thread me chalane ke liye (System Prompt Add Kiya)
+def fetch_ai_decision_sync(prompt, system_prompt):
     payload = {
         "model": "qwen2.5-coder:1.5b", 
         "prompt": prompt, 
+        "system": system_prompt, # 🔥 NAYA: Kadak System Prompt bheja ja raha hai
         "stream": True,
         "options": {
             "num_ctx": 4096, # RAM SAVER
@@ -78,13 +79,26 @@ async def think_and_act(page, goal):
     dom_elements = await get_dom_map(page)
     url = page.url
     
-    # 🔥 FIX: AI ko Strictly "DOUBLE QUOTES" use karne ko bola hai taaki JSON crash na ho
-    prompt = f"""Goal:{goal}. URL:{url}. Elements:{json.dumps(dom_elements)}.
-Respond ONLY in valid JSON format. You MUST use DOUBLE QUOTES for all keys and values:
+    # 🔥 NAYA: Bada aur strict System Prompt jo AI ko bhatakne nahi dega
+    system_prompt = """You are an elite, strict web automation AI. Your ONLY job is to achieve the user's GOAL.
+CRITICAL RULES:
+1. ABSOLUTE OBEDIENCE: Do exactly what the GOAL says. Do NOT guess or click random buttons.
+2. URL NAVIGATION: If the GOAL is a domain name (e.g., 'luviio.in', 'youtube.com'), your VERY FIRST action MUST be 'navigate' to 'https://[domain]'.
+3. JSON ONLY: You must respond ONLY with valid JSON. No markdown, no explanations, no extra text.
+4. DOUBLE QUOTES: Use double quotes for all JSON keys and values.
+5. FINISH: When the goal is met, output action 'finish'."""
+
+    # Prompt ko chota aur clean kar diya kyunki rules ab System Prompt mein hain
+    prompt = f"""Goal: {goal}
+Current URL: {url}
+Visible Elements: {json.dumps(dom_elements)}
+
+Respond strictly in this JSON FORMAT:
 {{"action": "click/type/navigate/finish", "x": 0, "y": 0, "text": "", "url": "", "thought": "Short reason"}}"""
 
     try:
-        full_response = await asyncio.to_thread(fetch_ai_decision_sync, prompt)
+        # System prompt ko API request mein pass kar rahe hain
+        full_response = await asyncio.to_thread(fetch_ai_decision_sync, prompt, system_prompt)
         clean_res = full_response.strip()
         
         if "```json" in clean_res:
@@ -112,8 +126,12 @@ Respond ONLY in valid JSON format. You MUST use DOUBLE QUOTES for all keys and v
             await page.keyboard.press("Enter")
             await asyncio.sleep(1)
         elif action == 'navigate':
-            swarm_log(f"🌐 Naye URL par jaa rahe hain: {decision['url']}")
-            await page.goto(decision['url'])
+            # Check if URL needs formatting
+            target_url = decision['url']
+            if not target_url.startswith('http'):
+                target_url = 'https://' + target_url
+            swarm_log(f"🌐 Naye URL par jaa rahe hain: {target_url}")
+            await page.goto(target_url)
         elif action == 'finish':
             swarm_log("🎯 KAAM POORA HO GAYA!")
             return True
@@ -132,7 +150,6 @@ def save_frame_sync(data):
 async def browser_logic():
     swarm_log("🚀 MANUS AGENT INITIALIZING (24/7 MODE)...")
     
-    # 🔥 Browser ab main loop ke bahar hai, yani 24/7 ON rahega
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=False, 
@@ -145,10 +162,15 @@ async def browser_logic():
                 "--disable-extensions",
                 "--disable-sync",
                 "--disable-translate",
-                "--mute-audio" # Ye sab unused RAM khaane waali cheezein band rahengi
+                "--mute-audio" 
             ]
         )
-        context = await browser.new_context(viewport={'width': 1280, 'height': 800})
+        # 🔥 FIX: locale='en-US' add kiya taaki har website sirf English mein khule!
+        context = await browser.new_context(
+            viewport={'width': 1280, 'height': 800},
+            locale='en-US',
+            timezone_id='America/New_York'
+        )
         page = await context.new_page()
         await stealth_async(page)
 
@@ -170,24 +192,20 @@ async def browser_logic():
         await page.goto(DEFAULT_URL)
         swarm_log("💤 Agent is ONLINE 24/7 and waiting for tasks...")
 
-        # 🔄 Ye loop ab continuously chalta rahega task dhoondhne ke liye
         while True:
             if os.path.exists(INST_PATH):
                 with open(INST_PATH, 'r') as f: goal = f.read().strip()
                 if goal:
                     swarm_log(f"🎯 NAYA GOAL MILA: {goal}")
                     
-                    # Kaam shuru
                     for _ in range(15):
                         done = await think_and_act(page, goal)
                         if done: break
                         await asyncio.sleep(1.5)
                     
                     swarm_log("✅ Kaam khatam! Waiting for next instruction...")
-                    # Instruction complete hone ke baad delete
                     if os.path.exists(INST_PATH): os.remove(INST_PATH)
             
-            # Idle polling delay (jab tak koi kaam nahi aata)
             await asyncio.sleep(2)
 
 if __name__ == "__main__":
