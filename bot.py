@@ -54,9 +54,23 @@ async def think_and_act(page, goal):
 Respond ONLY in JSON format: {{"action": "click/type/navigate/finish", "x": 0, "y": 0, "text": "", "url": "", "thought": "Short reason"}}"""
 
     try:
-        payload = {"model": "qwen2.5-coder:1.5b", "prompt": prompt, "stream": False}
-        req = urllib.request.Request(OLLAMA_URL, data=json.dumps(payload).encode('utf-8'), 
-                                    headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {HF_TOKEN}'})
+        # 🔥 Added options.num_ctx to unlock full 32K context limit for Qwen 1.5B
+        payload = {
+            "model": "qwen2.5-coder:1.5b", 
+            "prompt": prompt, 
+            "stream": True,
+            "options": {
+                "num_ctx": 32768
+            }
+        }
+        
+        # 🔥 Explicitly defined method='POST' just to be 100% safe
+        req = urllib.request.Request(
+            OLLAMA_URL, 
+            data=json.dumps(payload).encode('utf-8'), 
+            headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {HF_TOKEN}'},
+            method='POST'
+        )
         
         # Timeout 120s kiya hai, par short prompt ki wajah se reply 20s mein aa jayega
         with urllib.request.urlopen(req, timeout=120) as r:
