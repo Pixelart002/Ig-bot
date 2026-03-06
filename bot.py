@@ -18,23 +18,27 @@ def swarm_log(msg):
 
 async def get_dom_map(page):
     try:
+        # 🔥 DIET DOM: Kam elements aur trim kiya hua text bhejo
         return await page.evaluate("""
             () => {
                 const items = [];
-                const interactive = document.querySelectorAll('button, a, input, [role="button"], textarea');
+                const interactive = document.querySelectorAll('button, a, input, textarea');
                 interactive.forEach((el, i) => {
                     const rect = el.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
+                    // Sirf wahi elements lo jo screen par properly visible hain
+                    if (rect.width > 0 && rect.height > 0 && rect.y >= 0) {
                         items.push({ 
                             id: i,
                             tag: el.tagName,
-                            text: el.innerText || el.getAttribute('aria-label') || el.placeholder || '',
-                            x: rect.x + rect.width/2,
-                            y: rect.y + rect.height/2
+                            // 🔥 TEXT TRIMMING: AI ka time bachane ke liye sirf 20 words
+                            text: (el.innerText || el.getAttribute('aria-label') || el.placeholder || '').substring(0, 20).replace(/\\n/g, ' '),
+                            x: Math.round(rect.x + rect.width/2),
+                            y: Math.round(rect.y + rect.height/2)
                         });
                     }
                 });
-                return items.slice(0, 30);
+                // 🔥 TOP 10 ITEMS ONLY
+                return items.slice(0, 10);
             }
         """)
     except Exception as e:
@@ -45,38 +49,29 @@ async def think_and_act(page, goal):
     dom_elements = await get_dom_map(page)
     url = page.url
     
-    prompt = f"""
-    GOAL: {goal}
-    CURRENT URL: {url}
-    PAGE ELEMENTS: {json.dumps(dom_elements)}
-    
-    You are an autonomous browser agent. Decide the next action based on elements and the goal.
-    If the goal implies visiting a specific website, your first action MUST be to navigate there.
-    Respond ONLY in valid JSON format exactly like this:
-    {{"action": "click", "x": 100, "y": 200, "thought": "Reasoning here"}}
-    OR
-    {{"action": "type", "text": "hello", "x": 100, "y": 200, "thought": "Reasoning here"}}
-    OR
-    {{"action": "navigate", "url": "https://example.com", "thought": "Reasoning here"}}
-    OR
-    {{"action": "finish", "thought": "Goal achieved"}}
-    """
+    # 🔥 ULTRA SHORT PROMPT: AI fatafat padh kar reply dega
+    prompt = f"""Goal:{goal}. URL:{url}. Elements:{json.dumps(dom_elements)}.
+Respond ONLY in JSON format: {{"action": "click/type/navigate/finish", "x": 0, "y": 0, "text": "", "url": "", "thought": "Short reason"}}"""
 
     try:
         payload = {"model": "qwen2.5-coder:7b", "prompt": prompt, "stream": False}
         req = urllib.request.Request(OLLAMA_URL, data=json.dumps(payload).encode('utf-8'), 
                                     headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {HF_TOKEN}'})
-        with urllib.request.urlopen(req, timeout=60) as r:
+        
+        # Timeout 120s kiya hai, par short prompt ki wajah se reply 20s mein aa jayega
+        with urllib.request.urlopen(req, timeout=120) as r:
             res_raw = r.read().decode('utf-8')
             res = json.loads(res_raw)
             clean_res = res.get('response', '{}').strip()
+            
+            # Markdown parser fallback
             if "```json" in clean_res:
                 clean_res = clean_res.split("```json")[1].split("```")[0].strip()
             elif "```" in clean_res:
                 clean_res = clean_res.split("```")[1].strip()
             
             decision = json.loads(clean_res)
-            swarm_log(f"🧠 THOUGHT: {decision.get('thought')}")
+            swarm_log(f"🧠 {decision.get('thought', 'Acting...')}")
             
             action = decision.get('action')
             if action == 'click':
