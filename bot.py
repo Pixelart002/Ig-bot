@@ -9,6 +9,9 @@ LOG_PATH = "/tmp/swarm_logic.txt"
 STREAM_PATH = "/tmp/stream.jpg"
 INST_PATH = "instructions.txt"
 
+# Anti-Link Formatting Trick
+DEFAULT_URL = "https://" + "www.google.com"
+
 def swarm_log(msg):
     print(f"[MANUS] {msg}", flush=True)
     with open(LOG_PATH, "a") as f: f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
@@ -42,7 +45,6 @@ async def think_and_act(page, goal):
     dom_elements = await get_dom_map(page)
     url = page.url
     
-    # AI Prompt updated to instruct it to navigate dynamically
     prompt = f"""
     GOAL: {goal}
     CURRENT URL: {url}
@@ -68,7 +70,6 @@ async def think_and_act(page, goal):
             res_raw = r.read().decode('utf-8')
             res = json.loads(res_raw)
             clean_res = res.get('response', '{}').strip()
-            # Clean up markdown if AI sends it
             if "```json" in clean_res:
                 clean_res = clean_res.split("```json")[1].split("```")[0].strip()
             elif "```" in clean_res:
@@ -111,18 +112,14 @@ async def browser_logic():
         client.on("Page.screencastFrame", handle_screencast)
         await client.send("Page.startScreencast", {"format": "jpeg", "quality": 15})
 
-        # ✅ Default start page (Clean URL, completely outside the task loop)
         swarm_log("🌐 Opening default browser page...")
-        await page.goto("[https://www.google.com](https://www.google.com)")
+        await page.goto(DEFAULT_URL)
 
         while True:
             if os.path.exists(INST_PATH):
                 with open(INST_PATH, 'r') as f: goal = f.read().strip()
                 if goal:
                     swarm_log(f"🎯 NEW GOAL DETECTED: {goal}")
-                    
-                    # ✅ Removed hardcoded Google navigation from here. 
-                    # The AI will decide to navigate based on the prompt.
                     for _ in range(15):
                         done = await think_and_act(page, goal)
                         if done: break
