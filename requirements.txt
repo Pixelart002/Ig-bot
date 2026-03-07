@@ -3,3 +3,4 @@ schedule==1.2.2
 requests==2.31.0
 urllib3==2.2.1
 Pillow>=8.1.1
+flask
