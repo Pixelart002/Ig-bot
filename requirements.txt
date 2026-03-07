@@ -1,4 +1,0 @@
-flask[async]
-playwright
-playwright-stealth==1.0.6
-gunicorn

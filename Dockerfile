@@ -1,17 +1,10 @@
-FROM mcr.microsoft.com/playwright:v1.41.0-jammy
+FROM python:3.10-slim
 
 WORKDIR /app
-COPY . /app
 
-RUN apt-get update && apt-get install -y \
-    python3-pip \
-    xvfb \
-    fluxbox \
-    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip3 install --no-cache-dir -r requirements.txt
-RUN playwright install chromium
+COPY ig_bot.py .
 
-EXPOSE 8000
-RUN chmod +x start.sh
-CMD ["bash", "start.sh"]
+CMD ["python", "-u", "ig_bot.py"]
