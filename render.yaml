@@ -21,10 +21,6 @@ services:
       - key: VERIFICATION_BASE_URL
         sync: false
       - key: CDP_URL
-        value: http://127.0.0.1:9222
-      - key: CDP_HOST
-        value: 127.0.0.1
-      - key: CDP_PORT
-        value: 9222
+        sync: false
       - key: VERIFICATION_HOST
         value: 0.0.0.0
