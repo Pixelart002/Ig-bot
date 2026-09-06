@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Lightpanda must stay private/local; the FastAPI bridge is the only public browser surface.
+# Lightpanda stays local/private. Telegram uses direct getUpdates polling.
 npm run browser > /tmp/lightpanda.log 2>&1 &
 BROWSER_PID=$!
 
