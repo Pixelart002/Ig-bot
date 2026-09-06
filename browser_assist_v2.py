@@ -55,6 +55,13 @@ def _call(ws, method, params=None, request_id=1, session_id=None):
     raise TimeoutError(f"CDP timeout: {method}")
 
 
+# Public compatibility API used by verification_bridge.py.
+# It deliberately operates on the already-owned websocket; it never creates
+# a second browser connection or attempts an unsupported reattach.
+def cdp_call(ws, method, params=None, request_id=1, session_id=None):
+    return _call(ws, method, params, request_id=request_id, session_id=session_id)
+
+
 def _eval(tab: dict, expression: str) -> Any:
     with tab.setdefault("_lock", threading.RLock()):
         ws, sid = tab.get("_ws"), tab.get("sessionId")
@@ -71,6 +78,10 @@ def _eval(tab: dict, expression: str) -> Any:
                 last = exc
             time.sleep(0.4)
         raise RuntimeError(f"Runtime.evaluate failed: {last}")
+
+
+# Backwards-compatible private alias retained for existing imports.
+_evaluate = _eval
 
 
 def start_keepalive(tab: dict, interval: float = 15.0):
