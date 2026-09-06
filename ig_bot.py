@@ -30,26 +30,63 @@ def ai_chat(system_prompt: str, user_prompt: str, max_tokens: int = 250) -> str 
     if not HF_TOKEN:
         logging.error("HF_TOKEN is not configured.")
         return None
-    payload = {"model": HF_MODEL, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], "max_tokens": max_tokens, "temperature": 0.9, "stream": False}
-    headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+
+    payload = {
+        "model": HF_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.9,
+        "stream": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
     for attempt in range(4):
         try:
-            response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=45)
+            response = requests.post(
+                HF_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=45,
+            )
+
+            # 400/401/403/404 are request/auth/configuration errors. Retrying
+            # the same request will not fix them. Log only the provider's
+            # response body; never log the token or Authorization header.
+            if response.status_code >= 400 and response.status_code not in (429, 502, 503, 504):
+                logging.error(
+                    "Hugging Face HTTP %s: %s",
+                    response.status_code,
+                    response.text[:1500],
+                )
+                response.raise_for_status()
+
             if response.status_code in (429, 502, 503, 504):
                 wait = min(20, 3 * (2 ** attempt))
-                logging.warning("Hugging Face model not ready/rate-limited (HTTP %s); retrying in %ss", response.status_code, wait)
+                logging.warning(
+                    "Hugging Face model not ready/rate-limited (HTTP %s); retrying in %ss",
+                    response.status_code,
+                    wait,
+                )
                 time.sleep(wait)
                 continue
-            response.raise_for_status()
+
             data: dict[str, Any] = response.json()
             return data["choices"][0]["message"]["content"].strip()
+
         except (requests.RequestException, KeyError, IndexError, TypeError) as exc:
-            if attempt == 3:
-                logging.error("AI request failed after retries: %s", exc)
+            if attempt == 3 or (isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code < 500):
+                logging.error("AI request failed: %s", exc)
                 return None
             wait = min(20, 3 * (2 ** attempt))
             logging.warning("AI request failed; retrying in %ss: %s", wait, exc)
             time.sleep(wait)
+
     return None
 
 
@@ -58,8 +95,12 @@ def generate_password(length: int = 20) -> str:
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_"
     while True:
         password = "".join(secrets.choice(alphabet) for _ in range(length))
-        if (any(c.islower() for c in password) and any(c.isupper() for c in password)
-                and any(c.isdigit() for c in password) and any(c in "!@#$%^&*-_" for c in password)):
+        if (
+            any(c.islower() for c in password)
+            and any(c.isupper() for c in password)
+            and any(c.isdigit() for c in password)
+            and any(c in "!@#$%^&*-_" for c in password)
+        ):
             return password
 
 
@@ -93,7 +134,11 @@ Rules: usernames 3-30 characters; letters, numbers, periods and underscores only
 
 
 def generate_caption(topic: str) -> str | None:
-    return ai_chat("You are a tech Instagram copywriter. Write one concise original caption. Use at most 5 relevant hashtags and do not claim affiliation with any brand.", f"Write a caption about: {topic}", 160)
+    return ai_chat(
+        "You are a tech Instagram copywriter. Write one concise original caption. Use at most 5 relevant hashtags and do not claim affiliation with any brand.",
+        f"Write a caption about: {topic}",
+        160,
+    )
 
 
 if __name__ == "__main__":
