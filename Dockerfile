@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
-COPY ig_bot.py browser_assist.py stats.py workflow.py verification_bridge.py telegram_bot.py start_lightpanda.sh ./
+COPY ig_bot.py browser_assist.py stats.py workflow.py verification_bridge.py telegram_bot.py start_lightpanda.sh lightpanda_runner.js ./
 RUN chmod +x start_lightpanda.sh
 
 ENV CDP_HOST=127.0.0.1
