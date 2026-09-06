@@ -2,6 +2,9 @@ import json
 import logging
 import os
 import re
+import secrets
+import string
+from datetime import date, timedelta
 from typing import Any
 
 import requests
@@ -37,8 +40,25 @@ def ai_chat(system_prompt: str, user_prompt: str, max_tokens: int = 250) -> str 
         return None
 
 
+def generate_password(length: int = 20) -> str:
+    """Generate a strong unique per-account password locally; never log it or send it to the AI."""
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_"
+    while True:
+        password = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (any(c.islower() for c in password) and any(c.isupper() for c in password)
+                and any(c.isdigit() for c in password) and any(c in "!@#$%^&*-_" for c in password)):
+            return password
+
+
+def generate_dob(start_year: int = 2000, end_year: int = 2008) -> str:
+    """Generate a random calendar date in the requested year range."""
+    start = date(start_year, 1, 1)
+    end = date(end_year, 12, 31)
+    return (start + timedelta(days=secrets.randbelow((end - start).days + 1))).isoformat()
+
+
 def generate_identity(theme: str = "AI, coding and technology") -> dict[str, Any] | None:
-    """Generate original identity suggestions for manual profile setup."""
+    """Generate a fresh profile identity and per-account generated metadata."""
     system_prompt = """You generate original Instagram profile identity ideas.
 Return ONLY valid JSON with this exact shape:
 {"display_names":["...","...","..."],"usernames":["...","...","...","...","..."],"bios":["...","...","..."]}
@@ -50,6 +70,8 @@ Rules: usernames 3-30 characters; letters, numbers, periods and underscores only
         parsed = json.loads(_clean_json_text(result))
         if not isinstance(parsed, dict):
             raise ValueError("AI returned a non-object JSON value")
+        parsed["password"] = generate_password()
+        parsed["date_of_birth"] = generate_dob(2000, 2008)
         record("identity_generated")
         return parsed
     except (json.JSONDecodeError, ValueError) as exc:
