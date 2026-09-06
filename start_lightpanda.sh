@@ -36,4 +36,4 @@ r.raise_for_status()
 print('Lightpanda CDP is ready:', r.json().get('Browser', 'unknown'))
 PY
 
-exec python3 -u telegram_bot.py
+exec python3 -u telegram_runner.py
