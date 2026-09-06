@@ -1,18 +1,15 @@
-"""One-time authenticated browser bridge for manual verification steps.
-
-This never exposes the CDP endpoint. It only proxies a tiny screenshot/input surface
-for the currently assigned Lightpanda tab and expires tokens automatically.
-"""
+"""Authenticated manual verification bridge and Telegram webhook server."""
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import threading
 from html import escape
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from browser_assist import cdp_call
@@ -43,8 +40,40 @@ def ws_for(session):
     return websocket.create_connection(session.tab["webSocketDebuggerUrl"], timeout=15)
 
 
+def telegram_webhook_secret() -> str:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 @app.get("/health")
 def health():
+    return {"ok": True}
+
+
+@app.post("/telegram/webhook")
+def telegram_webhook(update: dict, x_telegram_bot_api_secret_token: str | None = Header(default=None)):
+    """Receive Telegram updates through Render's single public HTTP service."""
+    expected = telegram_webhook_secret()
+    if not expected or x_telegram_bot_api_secret_token != expected:
+        raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret")
+
+    # Import lazily to avoid verification_bridge <-> telegram_bot import cycle.
+    import telegram_bot as bot
+
+    try:
+        if "callback_query" in update:
+            bot.handle_callback(update["callback_query"])
+        elif "message" in update:
+            bot.handle_message(update["message"])
+    except Exception as exc:
+        chat_id = (
+            update.get("message", {}).get("chat", {}).get("id")
+            or update.get("callback_query", {}).get("message", {}).get("chat", {}).get("id")
+        )
+        if chat_id:
+            bot.audit(int(chat_id), "Webhook Error", type(exc).__name__)
     return {"ok": True}
 
 
