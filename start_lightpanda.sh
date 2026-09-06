@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Lightpanda stays local/private. Telegram uses direct getUpdates polling.
+# Use Lightpanda Cloud when CDP_URL is a WebSocket; otherwise keep the local
+# Lightpanda fallback for development.
+if [[ "${CDP_URL:-}" == ws://* || "${CDP_URL:-}" == wss://* ]]; then
+  echo "Using Lightpanda Cloud CDP"
+  exec python3 -u telegram_runner.py
+fi
+
+# Local Lightpanda fallback.
 npm run browser > /tmp/lightpanda.log 2>&1 &
 BROWSER_PID=$!
 
