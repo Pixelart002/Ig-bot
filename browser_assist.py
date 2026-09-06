@@ -1,7 +1,7 @@
 """Lightpanda CDP helpers for the Instagram signup workflow.
 
 One signup session owns one original browser websocket for its whole lifetime.
-No CDP reattach/reconnect is attempted. CAPTCHA and other anti-bot challenges
+No CDP reattach/reconnect is attempted. CAPTCHA and other anti-bot controls
 remain manual; this module only fills normal signup fields and user-provided OTPs.
 """
 from __future__ import annotations
@@ -51,8 +51,12 @@ def _browser_ws_url():
 
 def _connect():
     return create_connection(
-        _browser_ws_url(), timeout=30, http_proxy_host=None, http_proxy_port=None,
-        http_no_proxy=["127.0.0.1", "localhost"], suppress_origin=True,
+        _browser_ws_url(),
+        timeout=30,
+        http_proxy_host=None,
+        http_proxy_port=None,
+        http_no_proxy=["127.0.0.1", "localhost"],
+        suppress_origin=True,
     )
 
 
@@ -68,9 +72,6 @@ def cdp_call(ws, method, params=None, request_id=1, session_id=None):
             continue
         incoming = json.loads(raw)
         if "id" not in incoming:
-            event = incoming.get("method", "")
-            if event in {"Target.detachedFromTarget", "Inspector.targetCrashed", "Runtime.executionContextDestroyed"}:
-                logging.warning("CDP async event: %s", event)
             continue
         if incoming.get("id") == request_id:
             return incoming
@@ -94,11 +95,16 @@ def _evaluate(tab, expression):
         last = None
         for attempt in range(3):
             try:
-                result = cdp_call(ws, "Runtime.evaluate", {"expression": expression, "returnByValue": True}, 100 + attempt, session_id)
+                result = cdp_call(
+                    ws,
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True, "awaitPromise": True},
+                    100 + attempt,
+                    session_id,
+                )
                 if not result.get("error"):
                     return result.get("result", {}).get("result", {}).get("value")
-                error = result["error"]
-                last = RuntimeError(f"CDP Runtime.evaluate failed: {error}")
+                last = RuntimeError(f"CDP Runtime.evaluate failed: {result['error']}")
             except Exception as exc:
                 last = exc
             if attempt < 2:
@@ -153,19 +159,31 @@ def open_url(url):
             target_id = created.get("result", {}).get("targetId")
             if not target_id:
                 raise RuntimeError("Target.createTarget returned no targetId")
-            attached = cdp_call(ws, "Target.attachToTarget", {"targetId": target_id, "flatten": True}, 2)
+            attached = cdp_call(
+                ws,
+                "Target.attachToTarget",
+                {"targetId": target_id, "flatten": True},
+                2,
+            )
             if attached.get("error"):
                 raise RuntimeError(f"Target.attachToTarget failed: {attached['error']}")
             session_id = attached.get("result", {}).get("sessionId")
             if not session_id:
                 raise RuntimeError("Target.attachToTarget returned no sessionId")
             tab = {
-                "id": target_id, "targetId": target_id, "sessionId": session_id,
-                "type": "page", "url": url, "browserWebSocketDebuggerUrl": _browser_ws_url(),
-                "_ws": ws, "_lock": threading.RLock(), "_signup_thread": None,
+                "id": target_id,
+                "targetId": target_id,
+                "sessionId": session_id,
+                "type": "page",
+                "url": url,
+                "browserWebSocketDebuggerUrl": _browser_ws_url(),
+                "_ws": ws,
+                "_lock": threading.RLock(),
+                "_signup_thread": None,
                 "_signup_stop": threading.Event(),
             }
             _prepare_page(tab)
+            logging.info("Lightpanda signup target attached; original CDP connection retained")
             return tab
         except (WebSocketBadStatusException, requests.RequestException, OSError, ValueError, RuntimeError, TimeoutError) as exc:
             last_error = exc
@@ -203,21 +221,23 @@ def _set_input(tab, selectors, value):
     if not value:
         return False
     payload = {"selectors": selectors, "value": str(value)}
-    return bool(_evaluate(tab, """(p)=>{const el=p.selectors.map(s=>document.querySelector(s)).find(Boolean);if(!el)return false;const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;setter?.call(el,p.value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));return el.value===p.value;}""" + f"({json.dumps(payload)})"))
+    expression = """(p)=>{const el=p.selectors.map(s=>document.querySelector(s)).find(Boolean);if(!el)return false;const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;if(setter)setter.call(el,p.value);else el.value=p.value;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));return el.value===p.value;}"""
+    return bool(_evaluate(tab, expression + f"({json.dumps(payload)})"))
 
 
 def _click_next(tab):
-    return bool(_evaluate(tab, """()=>{const buttons=[...document.querySelectorAll('button')];const b=buttons.find(x=>!x.disabled&&/^(next|continue|confirm|sign up|create account|submit|verify)$/i.test((x.innerText||'').trim()));if(!b)return false;b.click();return true;}"""))
+    expression = """()=>{const buttons=[...document.querySelectorAll('button')];const b=buttons.find(x=>!x.disabled&&/^(next|continue|confirm|sign up|create account|submit|verify)$/i.test((x.innerText||'').trim()));if(!b)return false;b.click();return true;}"""
+    return bool(_evaluate(tab, expression))
 
 
 def _username_available(tab, username):
     if not _set_input(tab, ['input[name="username"]', 'input[autocomplete="username"]'], username):
         return False
     unavailable = re.compile(r"username.*(?:not available|unavailable|already.*(?:taken|use))|please try another username", re.I)
+    expression = """(()=>{const el=document.querySelector('input[name="username"]')||document.querySelector('input[autocomplete="username"]');const box=el?.closest('form')||el?.parentElement||document.body;return {invalid:el?.getAttribute('aria-invalid')||'',text:(box?.innerText||document.body?.innerText||'').slice(0,3000)};})()"""
     for _ in range(8):
-        state = _evaluate(tab, """(()=>{const el=document.querySelector('input[name="username"]')||document.querySelector('input[autocomplete="username"]');const box=el?.closest('form')||el?.parentElement||document.body;return {invalid:el?.getAttribute('aria-invalid')||'',text:(box?.innerText||document.body?.innerText||'').slice(0,3000)};})()""") or {}
-        text = str(state.get("text", ""))
-        if str(state.get("invalid", "")).lower() == "true" or unavailable.search(text):
+        state = _evaluate(tab, expression) or {}
+        if str(state.get("invalid", "")).lower() == "true" or unavailable.search(str(state.get("text", ""))):
             logging.info("Username rejected by Instagram: %s", username)
             return False
         time.sleep(0.75)
@@ -252,27 +272,42 @@ def _dob_parts(value):
         return "", "", ""
 
 
+def _page_snapshot(tab):
+    expression = """()=>({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,5000),inputs:[...document.querySelectorAll('input')].map(x=>({name:x.name,type:x.type,placeholder:x.placeholder,autocomplete:x.autocomplete,value:x.value})),selects:[...document.querySelectorAll('select')].map(x=>({name:x.name,aria:x.getAttribute('aria-label'),value:x.value}))})()"""
+    return _evaluate(tab, expression) or {}
+
+
+def _fill_dob(tab, dob):
+    month, day, year = _dob_parts(dob)
+    if not (month and day and year):
+        return False
+    payload = json.dumps({"m": month, "d": day, "y": year})
+    expression = """(v)=>{const pick=(selectors,val)=>{const el=selectors.map(s=>document.querySelector(s)).find(Boolean);if(!el)return false;const option=[...el.options].find(x=>x.value===String(val)||x.textContent.trim()===String(val));if(!option)return false;el.value=option.value;el.dispatchEvent(new Event('change',{bubbles:true}));return true;};return {month:pick(['select[name=month]','select[aria-label*="Month" i]'],v.m),day:pick(['select[name=day]','select[aria-label*="Day" i]'],v.d),year:pick(['select[name=year]','select[aria-label*="Year" i]'],v.y)};}"
+    return bool(_evaluate(tab, expression + f"({payload})"))
+
+
 def _fill_visible_signup_step(tab, credentials, identity):
     email = credentials.get("email") or identity.get("email")
     password = credentials.get("password") or identity.get("password")
     username = identity.get("selected_username") or identity.get("username")
     full_name = credentials.get("full_name") or identity.get("display_name") or ((identity.get("display_names") or [""])[0])
     dob = identity.get("date_of_birth") or credentials.get("date_of_birth")
-    result = _evaluate(tab, """()=>({url:location.href,text:(document.body?.innerText||'').slice(0,5000),inputs:[...document.querySelectorAll('input')].map(x=>({name:x.name,type:x.type,placeholder:x.placeholder,autocomplete:x.autocomplete,value:x.value})),selects:[...document.querySelectorAll('select')].map(x=>({name:x.name,aria:x.getAttribute('aria-label'),value:x.value}))})()""") or {}
-    text = str(result.get("text", "")).lower()
-    changed = False
+    snapshot = _page_snapshot(tab)
+    text = str(snapshot.get("text", "")).lower()
+
     if any(k in text for k in ("confirmation code", "security code", "enter the code", "confirm your email")):
         return "otp_required"
     if "captcha" in text:
         return "captcha_required"
+    if any(k in text for k in ("welcome to instagram", "your instagram profile", "account created")):
+        return "completed"
+
+    changed = False
     changed |= _set_input(tab, ['input[name="emailOrPhone"]', 'input[name="email"]', 'input[type="email"]', 'input[autocomplete="email"]'], email)
     changed |= _set_input(tab, ['input[name="password"]', 'input[type="password"]', 'input[autocomplete="new-password"]'], password)
     changed |= _set_input(tab, ['input[name="fullName"]', 'input[autocomplete="name"]'], full_name)
     changed |= _set_input(tab, ['input[name="username"]', 'input[autocomplete="username"]'], username)
-
-    month, day, year = _dob_parts(dob)
-    if month and day and year:
-        _evaluate(tab, f"""(v)=>{{const pick=(ss,val)=>{{const el=ss.map(s=>document.querySelector(s)).find(Boolean);if(!el)return false;const o=[...el.options].find(x=>x.value===String(val)||x.textContent.trim()===String(val));if(!o)return false;el.value=o.value;el.dispatchEvent(new Event('change',{{bubbles:true}}));return true;}};return {{month:pick(['select[name=month]','select[aria-label*="Month" i]'],v.m),day:pick(['select[name=day]','select[aria-label*="Day" i]'],v.d),year:pick(['select[name=year]','select[aria-label*="Year" i]'],v.y)}};}})({json.dumps({'m':month,'d':day,'y':year)})""")
+    changed |= _fill_dob(tab, dob)
 
     if changed:
         try:
@@ -280,28 +315,26 @@ def _fill_visible_signup_step(tab, credentials, identity):
         except Exception as exc:
             logging.debug("Next click deferred: %s", exc)
         return "progressed"
-    if "welcome to instagram" in text or "your instagram profile" in text:
-        return "completed"
     return "waiting"
 
 
 def _signup_worker(tab, credentials, identity):
     logging.info("Signup progression worker started on existing Lightpanda session")
     deadline = time.time() + float(os.getenv("SIGNUP_FLOW_TIMEOUT", "900"))
+    last_state = None
     while not tab.get("_signup_stop").is_set() and time.time() < deadline:
         try:
             state = _fill_visible_signup_step(tab, credentials, identity)
             tab["signup_state"] = state
+            if state != last_state:
+                logging.info("Instagram signup state: %s", state)
+                last_state = state
             if state == "completed":
                 tab["signup_done"] = True
-                logging.info("Instagram signup flow completed")
                 return
-            if state in {"otp_required", "captcha_required"}:
-                # Do not fight the verification UI. OTP polling or the user handles it;
-                # this worker simply waits on the same tab and continues afterward.
-                time.sleep(2)
-            else:
-                time.sleep(2)
+            # OTP/CAPTCHA are intentionally not automated. Keep the same tab
+            # alive and let OTP polling/manual CAPTCHA handling take over.
+            time.sleep(1.5 if state in {"otp_required", "captcha_required"} else 2.0)
         except Exception as exc:
             logging.warning("Signup progression iteration failed: %s", exc)
             time.sleep(2)
@@ -312,7 +345,12 @@ def start_signup_progression(tab, credentials, identity):
     existing = tab.get("_signup_thread")
     if existing and existing.is_alive():
         return existing
-    thread = threading.Thread(target=_signup_worker, args=(tab, credentials or {}, identity or {}), name="instagram-signup-flow", daemon=True)
+    thread = threading.Thread(
+        target=_signup_worker,
+        args=(tab, credentials or {}, identity or {}),
+        name="instagram-signup-flow",
+        daemon=True,
+    )
     tab["_signup_thread"] = thread
     thread.start()
     return thread
@@ -346,22 +384,24 @@ def fill_otp(tab, otp):
     otp = str(otp).strip()
     if len(otp) != 6 or not otp.isdigit():
         return False
-    result = _evaluate(tab, """(code)=>{const inputs=[...document.querySelectorAll('input')];const el=inputs.find(x=>/code|otp|confirmation|security/i.test((x.name||'')+' '+(x.placeholder||'')+' '+(x.getAttribute('aria-label')||'')))||inputs.find(x=>x.inputMode==='numeric'||x.type==='number'||x.type==='tel');if(!el)return {filled:false};const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;setter?.call(el,code);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));const b=[...document.querySelectorAll('button')].find(x=>!x.disabled&&/confirm|continue|next|submit|verify/i.test(x.innerText||x.getAttribute('aria-label')||''));if(b)b.click();return {filled:true};}""" + f"({json.dumps(otp)})")
+    payload = json.dumps(otp)
+    expression = """(code)=>{const inputs=[...document.querySelectorAll('input')];const el=inputs.find(x=>/code|otp|confirmation|security/i.test((x.name||'')+' '+(x.placeholder||'')+' '+(x.getAttribute('aria-label')||'')))||inputs.find(x=>x.inputMode==='numeric'||x.type==='number'||x.type==='tel');if(!el)return {filled:false};const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;if(setter)setter.call(el,code);else el.value=code;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));const b=[...document.querySelectorAll('button')].find(x=>!x.disabled&&/confirm|continue|next|submit|verify/i.test(x.innerText||x.getAttribute('aria-label')||''));if(b)b.click();return {filled:true};}"""
+    result = _evaluate(tab, expression + f"({payload})")
     return bool(result and result.get("filled"))
 
 
 def inspect_state(tab):
     value = _evaluate(tab, "JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,5000)})")
     data = json.loads(value or "{}")
-    text = data.get("text", "").lower()
+    text = str(data.get("text", "")).lower()
     if any(x in text for x in ("security code", "confirmation code", "enter the code", "confirm your email")):
         status = "otp_required"
     elif "captcha" in text:
         status = "captcha_required"
-    elif tab.get("signup_done") or any(x in text for x in ("welcome to instagram", "your instagram profile")):
+    elif tab.get("signup_done") or any(x in text for x in ("welcome to instagram", "your instagram profile", "account created")):
         status = "completed"
-    elif tab.get("signup_state") in {"progressed", "waiting"}:
-        status = tab.get("signup_state", "waiting")
+    elif tab.get("signup_state") in {"progressed", "waiting", "otp_required", "captcha_required"}:
+        status = tab["signup_state"]
     else:
         status = "waiting"
     return {"status": status, "url": data.get("url", ""), "title": data.get("title", "")}
@@ -375,10 +415,10 @@ def start_signup(credentials, identity=None):
         if identity and not identity.get("selected_username"):
             selected = select_available_username(tab, identity)
             if not selected:
+                # Keep the original session alive so the user can regenerate
+                # the identity without leaving a dead tab in Session.
                 logging.warning("No username candidate was accepted; keeping browser session open")
                 return tab, False
-        # Do the first visible step synchronously, then continue all subsequent
-        # normal signup screens on the SAME tab/websocket in the background.
         filled = fill_fields(tab, credentials, identity)
         start_signup_progression(tab, credentials or {}, identity)
         return tab, filled
@@ -390,12 +430,16 @@ def start_signup(credentials, identity=None):
 def main():
     try:
         version = cdp_version()
-        credentials = {"email": os.getenv("IG_EMAIL", ""), "password": os.getenv("IG_PASSWORD", ""), "username": os.getenv("IG_USERNAME", ""), "full_name": os.getenv("IG_FULL_NAME", "")}
+        credentials = {
+            "email": os.getenv("IG_EMAIL", ""),
+            "password": os.getenv("IG_PASSWORD", ""),
+            "username": os.getenv("IG_USERNAME", ""),
+            "full_name": os.getenv("IG_FULL_NAME", ""),
+        }
         tab, filled = start_signup(credentials)
         print(f"Connected: {version.get('Browser', 'unknown browser')}")
         print(f"Signup tab: {tab.get('url', SIGNUP_URL)}")
         print(f"Initial fields handled: {filled}")
-        print("CAPTCHA/OTP/verification remain manual.")
         time.sleep(5)
         close_tab(tab)
         return 0
