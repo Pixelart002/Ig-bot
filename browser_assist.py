@@ -1,7 +1,6 @@
 """Lightpanda/CDP browser workflow helpers.
 
-Account credentials are supplied per workflow and are never written to the repo.
-CAPTCHA, OTP, verification, and anti-bot controls remain manual.
+CAPTCHA, OTP, verification and anti-bot controls remain manual.
 """
 from __future__ import annotations
 
@@ -10,6 +9,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from typing import Any
 
@@ -18,7 +18,6 @@ from websocket import WebSocketBadStatusException, create_connection
 
 CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222")
 SIGNUP_URL = "https://www.instagram.com/accounts/emailsignup/"
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
@@ -37,16 +36,19 @@ def cdp_version() -> dict:
 
 
 def _browser_ws_url() -> str:
-    cdp_url = CDP_URL.rstrip("/")
-    if cdp_url.startswith("https://"):
-        return cdp_url.replace("https://", "wss://", 1)
-    if cdp_url.startswith("http://"):
-        return cdp_url.replace("http://", "ws://", 1)
+    base = CDP_URL.rstrip("/")
+    if base.startswith("https://"):
+        return base.replace("https://", "wss://", 1)
+    if base.startswith("http://"):
+        return base.replace("http://", "ws://", 1)
     raise RuntimeError(f"Unsupported CDP_URL: {CDP_URL}")
 
 
 def _create_browser_connection():
-    return create_connection(_browser_ws_url(), timeout=30, http_proxy_host=None, http_proxy_port=None, http_no_proxy=["127.0.0.1", "localhost"], suppress_origin=True)
+    return create_connection(
+        _browser_ws_url(), timeout=30, http_proxy_host=None, http_proxy_port=None,
+        http_no_proxy=["127.0.0.1", "localhost"], suppress_origin=True,
+    )
 
 
 def cdp_call(ws, method: str, params: dict | None = None, request_id: int = 1, session_id: str | None = None) -> dict:
@@ -57,62 +59,9 @@ def cdp_call(ws, method: str, params: dict | None = None, request_id: int = 1, s
     deadline = time.time() + 30
     while time.time() < deadline:
         incoming = json.loads(ws.recv())
-        # CDP sends asynchronous events on the same socket. Ignore them until
-        # the response for this request arrives.
         if incoming.get("id") == request_id:
             return incoming
     raise TimeoutError(f"Timed out waiting for CDP response: {method}")
-
-
-def _attach_existing_target(tab: dict) -> None:
-    """Reattach to an existing Lightpanda target if its websocket was lost."""
-    target_id = tab.get("targetId") or tab.get("id")
-    if not target_id:
-        raise RuntimeError("CDP tab has no target id")
-    old_ws = tab.get("_ws")
-    if old_ws is not None:
-        try:
-            old_ws.close()
-        except Exception:
-            pass
-    ws = _create_browser_connection()
-    attached = cdp_call(ws, "Target.attachToTarget", {"targetId": target_id, "flatten": True}, request_id=1)
-    if attached.get("error"):
-        ws.close()
-        raise RuntimeError(f"CDP reattach failed: {attached['error']}")
-    session_id = attached.get("result", {}).get("sessionId")
-    if not session_id:
-        ws.close()
-        raise RuntimeError("CDP reattach returned no sessionId")
-    tab["_ws"] = ws
-    tab["sessionId"] = session_id
-    tab["targetId"] = target_id
-    tab["id"] = target_id
-    _prepare_page(tab)
-    logging.info("Reattached CDP target %s", target_id)
-
-
-def _evaluate(tab: dict, expression: str) -> Any:
-    ws = tab.get("_ws")
-    session_id = tab.get("sessionId")
-    if ws is None or not session_id:
-        _attach_existing_target(tab)
-    try:
-        result = cdp_call(tab["_ws"], "Runtime.evaluate", {"expression": expression, "returnByValue": True}, session_id=tab["sessionId"])
-    except Exception as first_error:
-        # A long-lived Telegram flow can outlive the websocket connection even
-        # though the Lightpanda page/target is still alive. Reattach once and
-        # retry the same read instead of reporting a false "Session Check"
-        # failure.
-        logging.warning("CDP evaluate failed; attempting target reattach: %s", first_error)
-        try:
-            _attach_existing_target(tab)
-            result = cdp_call(tab["_ws"], "Runtime.evaluate", {"expression": expression, "returnByValue": True}, session_id=tab["sessionId"])
-        except Exception as second_error:
-            raise RuntimeError(f"CDP Runtime.evaluate failed after reconnect: {type(second_error).__name__}: {second_error}") from second_error
-    if result.get("error"):
-        raise RuntimeError(f"CDP Runtime.evaluate failed: {result['error']}")
-    return result.get("result", {}).get("result", {}).get("value")
 
 
 def _prepare_page(tab: dict) -> None:
@@ -120,6 +69,93 @@ def _prepare_page(tab: dict) -> None:
         result = cdp_call(tab["_ws"], method, session_id=tab["sessionId"])
         if result.get("error"):
             logging.warning("%s failed: %s", method, result["error"])
+
+
+def _attach_existing_target(tab: dict) -> None:
+    """Reconnect only when the transport is actually gone.
+
+    Lightpanda can return BrowserContextNotLoaded when a healthy target is
+    re-attached through a second CDP connection. Therefore the old socket is
+    never closed before a replacement attachment is proven successful.
+    """
+    target_id = tab.get("targetId") or tab.get("id")
+    if not target_id:
+        raise RuntimeError("CDP tab has no target id")
+    ws = _create_browser_connection()
+    try:
+        attached = cdp_call(ws, "Target.attachToTarget", {"targetId": target_id, "flatten": True}, request_id=1)
+        if attached.get("error"):
+            raise RuntimeError(f"CDP reattach failed: {attached['error']}")
+        session_id = attached.get("result", {}).get("sessionId")
+        if not session_id:
+            raise RuntimeError("CDP reattach returned no sessionId")
+        old_ws = tab.get("_ws")
+        tab["_ws"] = ws
+        tab["sessionId"] = session_id
+        tab["targetId"] = target_id
+        tab["id"] = target_id
+        _prepare_page(tab)
+        if old_ws is not None and old_ws is not ws:
+            try:
+                old_ws.close()
+            except Exception:
+                pass
+        logging.info("Reattached CDP target %s", target_id)
+    except Exception:
+        try:
+            ws.close()
+        except Exception:
+            pass
+        raise
+
+
+def _socket_alive(ws) -> bool:
+    return bool(ws is not None and getattr(ws, "connected", True))
+
+
+def _evaluate(tab: dict, expression: str) -> Any:
+    lock = tab.setdefault("_lock", threading.RLock())
+    with lock:
+        ws = tab.get("_ws")
+        session_id = tab.get("sessionId")
+        if ws is None or not session_id:
+            _attach_existing_target(tab)
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                result = cdp_call(
+                    tab["_ws"], "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True},
+                    session_id=tab["sessionId"], request_id=100 + attempt,
+                )
+                if result.get("error"):
+                    error = result["error"]
+                    # Do not blindly reattach a target for browser-context errors.
+                    # Lightpanda reports BrowserContextNotLoaded during some
+                    # transient frame/context transitions; retrying the existing
+                    # session is safer and preserves the current page state.
+                    raise RuntimeError(f"CDP Runtime.evaluate failed: {error}")
+                return result.get("result", {}).get("result", {}).get("value")
+            except Exception as exc:
+                last_error = exc
+                logging.warning("CDP evaluate attempt %d/3 failed: %s", attempt + 1, exc)
+                if attempt < 2:
+                    time.sleep(0.25)
+                    continue
+                if not _socket_alive(tab.get("_ws")):
+                    try:
+                        _attach_existing_target(tab)
+                        result = cdp_call(
+                            tab["_ws"], "Runtime.evaluate",
+                            {"expression": expression, "returnByValue": True},
+                            session_id=tab["sessionId"], request_id=200,
+                        )
+                        if result.get("error"):
+                            raise RuntimeError(f"CDP Runtime.evaluate failed after reconnect: {result['error']}")
+                        return result.get("result", {}).get("result", {}).get("value")
+                    except Exception as reconnect_error:
+                        last_error = reconnect_error
+        raise RuntimeError(f"CDP Runtime.evaluate failed: {type(last_error).__name__}: {last_error}") from last_error
 
 
 def open_url(url: str) -> dict:
@@ -141,7 +177,12 @@ def open_url(url: str) -> dict:
             session_id = attached.get("result", {}).get("sessionId")
             if not session_id:
                 raise RuntimeError("CDP Target.attachToTarget returned no sessionId")
-            tab = {"id": target_id, "targetId": target_id, "sessionId": session_id, "type": "page", "url": url, "browserWebSocketDebuggerUrl": _browser_ws_url(), "_ws": ws}
+            tab = {
+                "id": target_id, "targetId": target_id, "sessionId": session_id,
+                "type": "page", "url": url,
+                "browserWebSocketDebuggerUrl": _browser_ws_url(), "_ws": ws,
+                "_lock": threading.RLock(),
+            }
             _prepare_page(tab)
             navigated = cdp_call(ws, "Page.navigate", {"url": url}, request_id=3, session_id=session_id)
             if navigated.get("error"):
@@ -155,20 +196,17 @@ def open_url(url: str) -> dict:
             if headers:
                 detail += f" headers={dict(headers)}"
             last_error = RuntimeError(f"Lightpanda CDP websocket handshake failed.{detail} {exc}")
-            logging.warning("Open tab attempt %d/3 failed: %s", attempt + 1, last_error)
-            if attempt < 2:
-                time.sleep(1)
         except (requests.RequestException, OSError, ValueError, RuntimeError, TimeoutError) as exc:
             last_error = exc
-            logging.warning("Open tab attempt %d/3 failed: %s", attempt + 1, exc)
-            if attempt < 2:
-                time.sleep(1)
         finally:
             if ws is not None and last_error is not None:
                 try:
                     ws.close()
                 except Exception:
                     pass
+        if attempt < 2:
+            logging.warning("Open tab attempt %d/3 failed: %s", attempt + 1, last_error)
+            time.sleep(1)
     assert last_error is not None
     raise last_error
 
@@ -238,11 +276,8 @@ def _pick_available_username(tab: dict, candidates: list[str]) -> str | None:
 
 
 def select_available_username(tab: dict, identity: dict[str, Any]) -> str | None:
-    """Check generated candidates in order and return only a confirmed available username."""
     candidates = [str(x) for x in (identity.get("usernames") or []) if str(x).strip()]
-    if not candidates:
-        return None
-    selected = _pick_available_username(tab, candidates[:5])
+    selected = _pick_available_username(tab, candidates[:5]) if candidates else None
     if selected:
         identity["selected_username"] = selected
         identity["username"] = selected
@@ -329,7 +364,7 @@ def submit_signup(tab: dict) -> bool:
 
 def fill_otp(tab: dict, otp: str) -> bool:
     otp = str(otp).strip()
-    if not otp or len(otp) > 32 or not otp.isalnum():
+    if not otp or len(otp) != 6 or not otp.isdigit():
         return False
     expression = """
     (code) => {
