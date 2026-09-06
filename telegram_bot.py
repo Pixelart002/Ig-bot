@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-from browser_assist import inspect_state, start_signup
+from browser_assist import inspect_state, start_keepalive, start_signup
 from ig_bot import generate_identity
 from otp_poller import clear_otp_file, queue_otp_code, start_otp_polling
 from run_logger import log_event
@@ -34,7 +34,6 @@ def telegram_webhook_secret() -> str:
 def tg(method: str, payload: dict[str, Any]) -> dict[str, Any]:
     if not API:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
-    # Telegram long-polling is 50s; HTTP timeout must be longer than that.
     response = requests.post(f"{API}/{method}", json=payload, timeout=65)
     response.raise_for_status()
     return response.json()
@@ -287,6 +286,10 @@ def handle_callback(callback: dict[str, Any]) -> None:
             record("confirmed")
             tab, filled = start_signup(credentials, session.identity)
             session.tab = tab
+            # Start immediately, before the first Telegram status check. This
+            # removes the idle gap in which Lightpanda may drop its execution
+            # context and also provides the requested document.title keepalive.
+            start_keepalive(tab, interval=1.5)
             session.status = "form_filled" if filled else "waiting"
             record("form_filled" if filled else "signup_waiting")
             send_session_status(chat_id)
@@ -298,61 +301,3 @@ def handle_callback(callback: dict[str, Any]) -> None:
             tg("sendMessage", {"chat_id": chat_id, "text": f"❌ Signup session failed: `{type(exc).__name__}`", "parse_mode": "Markdown", "reply_markup": cancel_keyboard()})
         return
     tg("sendMessage", {"chat_id": chat_id, "text": "Unknown action. Returning to menu.", "reply_markup": keyboard()})
-
-
-def handle_message(message: dict[str, Any]) -> None:
-    chat_id = int(message["chat"]["id"])
-    text = str(message.get("text", "")).strip()
-    if not allowed(chat_id):
-        return
-    session = get(chat_id)
-    if session and session.status in {"awaiting_email", "created"} and EMAIL_RE.fullmatch(text):
-        generate_after_email(chat_id, text)
-        return
-    if session and session.tab and session.status == "otp_required" and OTP_RE.fullmatch(text):
-        # Direct file-based OTP listener: no public URL/webhook path is used.
-        if queue_otp_code(text):
-            session.event("otp_received_from_telegram", "success")
-        return
-    if text.lower() in {"/start", "start"}:
-        tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Instagram Assistant*\n\nChoose an action:", "parse_mode": "Markdown", "reply_markup": keyboard()})
-        return
-    tg("sendMessage", {"chat_id": chat_id, "text": "Use the buttons above or send the requested email/6-digit OTP when prompted.", "parse_mode": "Markdown", "reply_markup": keyboard()})
-
-
-def process_update(update: dict[str, Any]) -> None:
-    if "callback_query" in update:
-        handle_callback(update["callback_query"])
-    elif "message" in update:
-        handle_message(update["message"])
-
-
-def run_polling() -> None:
-    offset = 0
-    try:
-        tg("deleteWebhook", {"drop_pending_updates": False})
-    except (requests.RequestException, ValueError, RuntimeError) as exc:
-        log_event("telegram", "delete_webhook_failed", "warning", error=f"{type(exc).__name__}: {str(exc)[:300]}")
-    while True:
-        try:
-            response = tg("getUpdates", {"timeout": 50, "offset": offset, "allowed_updates": ["message", "callback_query"]})
-            for update in response.get("result", []):
-                offset = max(offset, int(update["update_id"]) + 1)
-                try:
-                    process_update(update)
-                except Exception as exc:
-                    chat_id = int(update.get("message", {}).get("chat", {}).get("id") or update.get("callback_query", {}).get("message", {}).get("chat", {}).get("id") or 0)
-                    if chat_id:
-                        session = get(chat_id)
-                        audit(chat_id, "Polling Update Error", "failed", session.identity if session else None, f"{type(exc).__name__}: {str(exc)[:300]}")
-        except (requests.RequestException, ValueError, RuntimeError) as exc:
-            log_event("telegram", "polling_error", "warning", error=f"{type(exc).__name__}: {str(exc)[:300]}")
-            time.sleep(3)
-
-
-def configure_webhook() -> None:
-    raise RuntimeError("Webhook mode has been removed. Use direct Telegram getUpdates polling.")
-
-
-def start_bot() -> None:
-    run_polling()
