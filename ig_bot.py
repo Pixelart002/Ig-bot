@@ -116,6 +116,15 @@ def _local_identity(theme: str) -> dict[str, Any]:
     }
 
 
+def _normalize_username(value: str) -> str:
+    """Normalize an AI username into the format expected by Instagram's signup UI."""
+    value = value.strip().lower()
+    value = re.sub(r"[^a-z0-9._]+", "_", value)
+    value = re.sub(r"[._]{2,}", "_", value)
+    value = value.strip("._")
+    return value[:30]
+
+
 def _validate_identity(parsed: Any) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("AI returned a non-object JSON value")
@@ -126,6 +135,16 @@ def _validate_identity(parsed: Any) -> dict[str, Any]:
         raise ValueError("AI JSON is missing display_names, usernames, or bios")
     if not all(isinstance(value, str) and value.strip() for value in (*names, *usernames, *bios)):
         raise ValueError("AI JSON contains empty or non-string identity fields")
+
+    normalized_usernames: list[str] = []
+    for raw_username in usernames:
+        username = _normalize_username(raw_username)
+        if 3 <= len(username) <= 30 and username not in normalized_usernames:
+            normalized_usernames.append(username)
+    if len(normalized_usernames) < 5:
+        raise ValueError("AI JSON does not contain five usable unique usernames after normalization")
+
+    parsed["usernames"] = normalized_usernames[:5]
     return parsed
 
 
