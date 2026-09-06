@@ -17,9 +17,12 @@ def _raise_for_status(response,operation):
     except requests.HTTPError as exc:
         detail=response.text.strip().replace("\n"," ")[:300]; raise requests.HTTPError(f"{operation}: HTTP {response.status_code} {response.reason}; {detail}",response=response) from exc
 def cdp_version():
+    if CDP_URL.startswith(("ws://","wss://")):
+        return {"Browser":"Lightpanda Cloud","webSocketDebuggerUrl":CDP_URL}
     response=requests.get(f"{CDP_URL}/json/version",timeout=5); _raise_for_status(response,"CDP /json/version"); return response.json()
 def _browser_ws_url():
     base=CDP_URL.rstrip("/")
+    if base.startswith(("ws://","wss://")): return base
     if base.startswith("https://"): return base.replace("https://","wss://",1)
     if base.startswith("http://"): return base.replace("http://","ws://",1)
     raise RuntimeError(f"Unsupported CDP_URL: {CDP_URL}")
@@ -124,9 +127,6 @@ def _username_available(tab,username):
         if available.search(text):
             logging.info("Username explicitly available: %s",username); return True
         time.sleep(0.75)
-    # Instagram often gives no literal 'available' text on web signup. If no
-    # negative signal appeared, keep the candidate and let the signup form be
-    # the authoritative final check instead of killing the browser session.
     logging.info("Username has no negative availability signal; proceeding: %s",username)
     return True
 def select_available_username(tab,identity):
@@ -173,8 +173,6 @@ def start_signup(credentials,identity=None):
         if identity and not identity.get("selected_username"):
             selected=select_available_username(tab,identity)
             if not selected:
-                # Keep the original session alive so the caller can report the
-                # real failure instead of storing a closed tab as 'waiting'.
                 return tab,False
         filled=fill_fields(tab,credentials,identity)
         if filled: submit_signup(tab)
