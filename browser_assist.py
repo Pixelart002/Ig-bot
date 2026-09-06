@@ -62,7 +62,7 @@ def _create_browser_connection():
 
 
 def open_url(url: str) -> dict:
-    """Create and attach to a Lightpanda page through browser-level CDP."""
+    """Create, prepare, then navigate a Lightpanda page through browser-level CDP."""
     last_error: Exception | None = None
     for attempt in range(3):
         ws = None
@@ -71,7 +71,9 @@ def open_url(url: str) -> dict:
             browser_ws_url = _browser_ws_url()
             ws = _create_browser_connection()
 
-            created = cdp_call(ws, "Target.createTarget", {"url": url}, request_id=1)
+            # Start from a blank target so Page/Runtime/Network are enabled before
+            # Instagram navigation begins. This gives the browser a clean load cycle.
+            created = cdp_call(ws, "Target.createTarget", {"url": "about:blank"}, request_id=1)
             if created.get("error"):
                 raise RuntimeError(f"CDP Target.createTarget failed: {created['error']}")
             target_id = created.get("result", {}).get("targetId")
@@ -100,6 +102,17 @@ def open_url(url: str) -> dict:
                 "_ws": ws,
             }
             _prepare_page(tab)
+
+            navigated = cdp_call(
+                ws,
+                "Page.navigate",
+                {"url": url},
+                request_id=3,
+                session_id=session_id,
+            )
+            if navigated.get("error"):
+                raise RuntimeError(f"CDP Page.navigate failed: {navigated['error']}")
+            time.sleep(5)
             return tab
         except WebSocketBadStatusException as exc:
             status = getattr(exc, "status_code", None)
@@ -166,16 +179,15 @@ def _evaluate(tab: dict, expression: str) -> Any:
 
 
 def _prepare_page(tab: dict) -> None:
-    """Enable the page/runtime domains and allow initial DOM/resources to settle."""
+    """Enable the page/runtime/network domains before real navigation."""
     ws = tab.get("_ws")
     session_id = tab.get("sessionId")
     if ws is None or not session_id:
         raise RuntimeError("Cannot prepare page without a live CDP session")
-    for method in ("Page.enable", "Runtime.enable"):
+    for method in ("Page.enable", "Runtime.enable", "Network.enable"):
         result = cdp_call(ws, method, {}, session_id=session_id)
         if result.get("error"):
             raise RuntimeError(f"CDP {method} failed: {result['error']}")
-    time.sleep(3)
 
 
 def _wait_for_username_field(tab: dict, attempts: int = 20, delay: float = 0.5) -> bool:
