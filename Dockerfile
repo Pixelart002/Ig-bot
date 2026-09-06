@@ -11,7 +11,7 @@ RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund \
-    && npx @lightpanda/browser install latest
+    && npx @lightpanda/browser install 1.6.0
 
 COPY ig_bot.py browser_assist.py stats.py workflow.py verification_bridge.py telegram_bot.py start_lightpanda.sh lightpanda_runner.js ./
 RUN chmod +x start_lightpanda.sh
