@@ -8,10 +8,12 @@ services:
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: HF_TOKEN
+      - key: OLLAMA_URL
+        value: https://vivekkumarr-my-ai.hf.space
+      - key: OLLAMA_MODEL
+        value: qwen2.5-coder:1.5b
+      - key: OLLAMA_TOKEN
         sync: false
-      - key: HF_MODEL
-        value: Qwen/Qwen2.5-7B-Instruct-1M
       - key: TELEGRAM_ALLOWED_USER_IDS
         sync: false
       - key: SUPER_ADMIN_USER_IDS
