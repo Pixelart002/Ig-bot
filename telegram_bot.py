@@ -15,6 +15,7 @@ import requests
 
 from browser_assist import fill_otp, inspect_state, start_signup
 from ig_bot import generate_identity
+from run_logger import log_event
 from stats import format_stats, record
 from verification_bridge import start_bridge
 from workflow import clear, create, get
@@ -54,14 +55,15 @@ def admin_ids() -> set[str]:
     return parse_ids("SUPER_ADMIN_USER_IDS")
 
 
-def audit(chat_id: int, action: str, status: str, identity: dict[str, Any] | None = None) -> None:
+def audit(chat_id: int, action: str, status: str, identity: dict[str, Any] | None = None, detail: str | None = None) -> None:
     ids = admin_ids()
     if not ids:
         return
-    username = str((identity or {}).get("usernames", ["—"])[0])
+    username = str((identity or {}).get("selected_username") or (identity or {}).get("usernames", ["—"])[0])
     name = str((identity or {}).get("display_names", ["—"])[0])
     dob = str((identity or {}).get("date_of_birth") or "—")
-    text = ("👁 *Super Admin Activity*\n\n" f"👤 User ID: `{chat_id}`\n" f"⚙️ Action: *{action}*\n" f"📌 Status: *{status}*\n" f"👨 Name: `{name}`\n" f"🔹 Username: `{username}`\n" f"🎂 DOB: `{dob}`\n" "🔐 Password: `••••••••`")
+    detail_line = f"\n🧾 Detail: `{detail[:300]}`" if detail else ""
+    text = ("👁 *Super Admin Activity*\n\n" f"👤 User ID: `{chat_id}`\n" f"⚙️ Action: *{action}*\n" f"📌 Status: *{status}*\n" f"👨 Name: `{name}`\n" f"🔹 Username: `{username}`\n" f"🎂 DOB: `{dob}`\n" "🔐 Password: `••••••••`" + detail_line)
     for admin_id in ids:
         try:
             tg("sendMessage", {"chat_id": int(admin_id), "text": text, "parse_mode": "Markdown"})
@@ -110,7 +112,7 @@ def identity_text(identity: dict[str, Any], include_password: bool = True) -> st
     names = identity.get("display_names", [])
     usernames = identity.get("usernames", [])
     bios = identity.get("bios", [])
-    lines = ["*Name:* " + str(names[0] if names else "—"), "*Username:* " + str(usernames[0] if usernames else "—"), "*DOB:* " + str(identity.get("date_of_birth", "—")), "*Bio:* " + str(bios[0] if bios else "—")]
+    lines = ["*Name:* " + str(names[0] if names else "—"), "*Username:* " + str(identity.get("selected_username") or (usernames[0] if usernames else "—")), "*DOB:* " + str(identity.get("date_of_birth", "—")), "*Bio:* " + str(bios[0] if bios else "—")]
     if include_password:
         lines.insert(2, "*Password:* `" + str(identity.get("password", "—")) + "`")
     return "\n".join(lines)
@@ -129,6 +131,7 @@ def send_email_prompt(chat_id: int) -> None:
 def send_otp_prompt(chat_id: int, session, status: str = "otp_required") -> None:
     session.status = status
     record("otp_requested")
+    session.event("otp_requested", "success")
     audit(chat_id, "Create Account", "otp_required", session.identity)
     text = "🔢 *OTP required*\n\nInstagram has requested a verification code.\n\nSend the OTP here and I will enter only the code you provide into the active verification field."
     tg("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
@@ -146,22 +149,15 @@ def generate_after_email(chat_id: int, email: str) -> None:
     if not session:
         session = create(chat_id, {})
 
-    # The identity shown to the user before email collection is authoritative.
-    # Never silently replace a confirmed identity after the email arrives.
     existing_identity = session.identity if isinstance(session.identity, dict) else {}
-    has_identity = bool(
-        existing_identity.get("password")
-        and existing_identity.get("date_of_birth")
-        and existing_identity.get("display_names")
-        and existing_identity.get("usernames")
-    )
-
+    has_identity = bool(existing_identity.get("password") and existing_identity.get("date_of_birth") and existing_identity.get("display_names") and existing_identity.get("usernames"))
     audit(chat_id, "Create Account", "email_saved", existing_identity or None)
 
     if has_identity:
         existing_identity["email"] = email
         session.identity = existing_identity
         session.status = "identity_ready"
+        session.event("identity_reused", "success")
         audit(chat_id, "Create Account", "identity_reused", session.identity)
         tg("sendMessage", {"chat_id": chat_id, "text": "📧 Email saved.\n\n✅ Using the identity you already confirmed. No new identity was generated.\n\nReview the same account details, then continue.", "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
         return
@@ -179,6 +175,7 @@ def generate_after_email(chat_id: int, email: str) -> None:
     identity["email"] = email
     session.identity = identity
     session.status = "identity_ready"
+    session.event("identity_generated", "success")
     audit(chat_id, "Create Account", "identity_generated", identity)
     tg("sendMessage", {"chat_id": chat_id, "text": "🆕 *Account Details*\n\n" + identity_text(identity) + f"\n*Email:* `{email}`\n\nReview the details, then continue.", "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
 
@@ -210,8 +207,12 @@ def send_session_status(chat_id: int) -> None:
         tg("sendMessage", {"chat_id": chat_id, "text": "ℹ️ No active browser session.", "reply_markup": keyboard()})
         return
     try:
+        session.event("session_check_started", "info")
         state = inspect_state(session.tab)
+        if not isinstance(state, dict) or not state.get("status"):
+            raise RuntimeError(f"Invalid session state returned: {state!r}")
         session.status = state["status"]
+        session.event("session_check", "success", browser_status=state["status"], url=state.get("url", ""))
         if state["status"] == "otp_required":
             send_otp_prompt(chat_id, session)
         elif state["status"] == "captcha_required":
@@ -232,8 +233,11 @@ def send_session_status(chat_id: int) -> None:
             audit(chat_id, "Session Check", state["status"], session.identity or None)
             tg("sendMessage", {"chat_id": chat_id, "text": f"⏳ *Session status:* `{state['status']}`\n\nContinue the required step in the verification session, then check again.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
     except Exception as exc:
-        audit(chat_id, "Session Check", "failed", session.identity or None)
-        tg("sendMessage", {"chat_id": chat_id, "text": f"❌ Could not check the session: `{type(exc).__name__}`", "parse_mode": "Markdown", "reply_markup": cancel_keyboard()})
+        error = f"{type(exc).__name__}: {str(exc)}".replace("\n", " ")[:500]
+        session.event("session_check_failed", "error", error=error)
+        log_event(session.run_id, "session_check_exception", "error", error_type=type(exc).__name__, error=error)
+        audit(chat_id, "Session Check", "failed", session.identity or None, error)
+        tg("sendMessage", {"chat_id": chat_id, "text": "❌ Could not check the browser session.\n\nThe session has been kept alive; press *Check Status* again. If the browser connection dropped, it will be reconnected automatically.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
 
 
 def handle_callback(callback: dict[str, Any]) -> None:
@@ -292,7 +296,7 @@ def handle_callback(callback: dict[str, Any]) -> None:
         record("reviewed")
         audit(chat_id, "Create Account", "confirmed", session.identity)
         try:
-            credentials = {"email": str(session.identity.get("email", "")), "password": str(session.identity.get("password", "")), "username": str((session.identity.get("usernames") or [""])[0]), "full_name": str((session.identity.get("display_names") or [""])[0])}
+            credentials = {"email": str(session.identity.get("email", "")), "password": str(session.identity.get("password", "")), "username": str((session.identity.get("selected_username") or (session.identity.get("usernames") or [""])[0])), "full_name": str((session.identity.get("display_names") or [""])[0])}
             if not credentials["email"]:
                 session.status = "awaiting_email"
                 send_email_prompt(chat_id)
@@ -303,104 +307,76 @@ def handle_callback(callback: dict[str, Any]) -> None:
             session.status = "form_filled" if filled else "waiting"
             if filled:
                 record("form_filled")
-                audit(chat_id, "Create Account", "form_filled", session.identity)
-            session.started_at = time.time()
+            else:
+                record("signup_waiting")
             send_session_status(chat_id)
         except Exception as exc:
             session.status = "failed"
             record("signup_failed", time.time() - session.started_at)
-            audit(chat_id, "Create Account", "failed", session.identity)
-            tg("sendMessage", {"chat_id": chat_id, "text": f"❌ Signup session failed: `{type(exc).__name__}`", "parse_mode": "Markdown", "reply_markup": keyboard()})
+            session.event("signup_failed", "error", error_type=type(exc).__name__, error=str(exc)[:500])
+            audit(chat_id, "Create Account", "failed", session.identity, f"{type(exc).__name__}: {str(exc)[:300]}")
+            tg("sendMessage", {"chat_id": chat_id, "text": f"❌ Signup session failed: `{type(exc).__name__}`", "parse_mode": "Markdown", "reply_markup": cancel_keyboard()})
         return
-    if data == "login":
-        record("login_started")
-        audit(chat_id, "Login", "started")
-        create(chat_id, {})
-        try:
-            from browser_assist import open_url
-            session = get(chat_id)
-            session.tab = open_url(LOGIN_URL)
-            session.status = "login_pending"
-            audit(chat_id, "Login", "browser_session_ready")
-            tg("sendMessage", {"chat_id": chat_id, "text": "🔐 *Login session started*\n\nContinue in the verification session. If Instagram asks for CAPTCHA/2FA, complete it manually.\n\nWhen done, press *Check Status*.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
-        except Exception as exc:
-            record("login_failed")
-            audit(chat_id, "Login", "failed")
-            clear(chat_id)
-            tg("sendMessage", {"chat_id": chat_id, "text": f"❌ Login session failed: `{type(exc).__name__}`", "parse_mode": "Markdown", "reply_markup": keyboard()})
-        return
+    tg("sendMessage", {"chat_id": chat_id, "text": "Unknown action. Returning to menu.", "reply_markup": keyboard()})
 
 
 def handle_message(message: dict[str, Any]) -> None:
     chat_id = int(message["chat"]["id"])
-    text = message.get("text", "").strip()
+    text = str(message.get("text", "")).strip()
     if not allowed(chat_id):
-        tg("sendMessage", {"chat_id": chat_id, "text": "⛔ This bot is not enabled for your Telegram account."})
         return
-    if text in ("/start", "/menu"):
-        tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Instagram Assistant*\n\nChoose an action:", "parse_mode": "Markdown", "reply_markup": keyboard()})
-        return
-    if text == "/completed":
-        send_session_status(chat_id)
-        return
-    if text == "/cancel":
-        session = get(chat_id)
-        audit(chat_id, "Session", "cancelled", session.identity if session else None)
-        clear(chat_id)
-        tg("sendMessage", {"chat_id": chat_id, "text": "🛑 *Session cancelled.*", "reply_markup": keyboard()})
-        return
-
     session = get(chat_id)
-    if session and session.status == "awaiting_email":
-        if not EMAIL_RE.fullmatch(text):
-            tg("sendMessage", {"chat_id": chat_id, "text": "❌ Invalid email format.\n\nPlease send a valid email address or press *Cancel*.", "parse_mode": "Markdown", "reply_markup": cancel_keyboard()})
-            return
-        email = text.lower()
-        audit(chat_id, "Create Account", "email_received")
-        generate_after_email(chat_id, email)
+    if session and session.status in {"awaiting_email", "created"} and EMAIL_RE.fullmatch(text):
+        generate_after_email(chat_id, text)
         return
-
     if session and session.tab and session.status == "otp_required" and OTP_RE.fullmatch(text):
         try:
-            if fill_otp(session.tab, text):
-                session.status = "otp_submitted"
-                record("otp_submitted")
-                audit(chat_id, "Create Account", "otp_submitted", session.identity)
-                tg("sendMessage", {"chat_id": chat_id, "text": "✅ OTP entered into the active verification session.\n\n⏳ Checking the next step…"})
-                time.sleep(2)
+            ok = fill_otp(session.tab, text)
+            audit(chat_id, "OTP", "submitted" if ok else "rejected", session.identity)
+            tg("sendMessage", {"chat_id": chat_id, "text": "✅ OTP entered.\n\nChecking the session…" if ok else "❌ I could not find the OTP field. Complete the verification page manually, then press Check Status.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
+            if ok:
                 send_session_status(chat_id)
-            else:
-                audit(chat_id, "Create Account", "otp_field_not_found", session.identity)
-                tg("sendMessage", {"chat_id": chat_id, "text": "❌ OTP field not found. Open the verification session, reach the code screen, then try again.", "reply_markup": verification_keyboard(session)})
         except Exception as exc:
-            audit(chat_id, "Create Account", "otp_submit_failed", session.identity)
-            tg("sendMessage", {"chat_id": chat_id, "text": f"❌ OTP submission failed: `{type(exc).__name__}`", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
+            session.event("otp_failed", "error", error=f"{type(exc).__name__}: {str(exc)[:300]}")
+            audit(chat_id, "OTP", "failed", session.identity, f"{type(exc).__name__}: {str(exc)[:300]}")
+            tg("sendMessage", {"chat_id": chat_id, "text": f"❌ OTP handling failed: `{type(exc).__name__}`", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
         return
+    if text.lower() in {"/start", "start"}:
+        tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Instagram Assistant*\n\nChoose an action:", "parse_mode": "Markdown", "reply_markup": keyboard()})
+        return
+    tg("sendMessage", {"chat_id": chat_id, "text": "Use the buttons above or send the requested email/OTP when prompted.", "reply_markup": keyboard()})
 
-    if text:
-        tg("sendMessage", {"chat_id": chat_id, "text": "ℹ️ Use the buttons below to control the current flow.", "reply_markup": keyboard()})
+
+def process_update(update: dict[str, Any]) -> None:
+    if "callback_query" in update:
+        handle_callback(update["callback_query"])
+    elif "message" in update:
+        handle_message(update["message"])
 
 
-def main() -> None:
-    if not TOKEN:
-        raise SystemExit("Set TELEGRAM_BOT_TOKEN")
-    start_bridge()
+def run_polling() -> None:
     offset = 0
     while True:
-        for update in tg("getUpdates", {"timeout": 25, "offset": offset}).get("result", []):
-            offset = update["update_id"] + 1
-            try:
-                if "callback_query" in update:
-                    handle_callback(update["callback_query"])
-                elif "message" in update:
-                    handle_message(update["message"])
-            except Exception as exc:
-                chat_id = update.get("message", {}).get("chat", {}).get("id") or update.get("callback_query", {}).get("message", {}).get("chat", {}).get("id")
-                if chat_id:
-                    audit(int(chat_id), "Unhandled Error", type(exc).__name__)
-                    tg("sendMessage", {"chat_id": chat_id, "text": f"❌ Operation failed: `{type(exc).__name__}`", "parse_mode": "Markdown"})
-        time.sleep(0.2)
+        try:
+            response = tg("getUpdates", {"timeout": 50, "offset": offset})
+            for update in response.get("result", []):
+                offset = max(offset, int(update["update_id"]) + 1)
+                process_update(update)
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            print(f"Telegram polling error: {exc}")
+            time.sleep(3)
 
 
-if __name__ == "__main__":
-    main()
+def configure_webhook() -> None:
+    base = PUBLIC_BASE_URL
+    if not base:
+        raise RuntimeError("VERIFICATION_BASE_URL or PUBLIC_BASE_URL is required for webhook mode")
+    secret = telegram_webhook_secret()
+    tg("setWebhook", {"url": f"{base}/telegram/webhook", "secret_token": secret})
+
+
+def start_bot() -> None:
+    if os.getenv("TELEGRAM_USE_POLLING", "false").lower() == "true":
+        run_polling()
+    else:
+        configure_webhook()
