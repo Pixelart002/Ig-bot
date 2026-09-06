@@ -40,14 +40,19 @@ def cdp_version() -> dict:
 
 
 def open_url(url: str) -> dict:
+    # CDP's /json/new is a state-changing endpoint and must be called with PUT.
+    # GET can return HTTP 405 on current Chrome-compatible CDP servers.
     endpoint = f"{CDP_URL}/json/new?{quote(url, safe=':/?=&') }"
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            response = requests.get(endpoint, timeout=10)
-            _raise_for_status(response, "CDP /json/new")
-            return response.json()
-        except (requests.RequestException, ValueError) as exc:
+            response = requests.put(endpoint, timeout=10)
+            _raise_for_status(response, "CDP PUT /json/new")
+            tab = response.json()
+            if not tab.get("webSocketDebuggerUrl"):
+                raise RuntimeError("CDP created a tab without webSocketDebuggerUrl")
+            return tab
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
             last_error = exc
             logging.warning("Open tab attempt %d/3 failed: %s", attempt + 1, exc)
             if attempt < 2:
