@@ -1,10 +1,4 @@
-"""File-based Instagram OTP polling with a Lightpanda keep-alive loop.
-
-The Telegram listener writes a single six-digit code to otp.txt. A background
-worker polls that file every 1.5 seconds for at most 45 seconds. Each poll
-also evaluates document.title through the live CDP page adapter so the browser
-continues doing lightweight work while waiting for the code.
-"""
+"""File-based OTP polling with a Lightpanda keep-alive loop."""
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +14,6 @@ OTP_FILE = Path(os.getenv("OTP_FILE", "otp.txt"))
 OTP_INTERVAL = 1.5
 OTP_TIMEOUT = 45.0
 OTP_PATTERN_LENGTH = 6
-
 _file_lock = threading.RLock()
 
 
@@ -34,7 +27,6 @@ def _secure_write_code(code: str) -> None:
 
 
 def queue_otp_code(code: str) -> bool:
-    """Validate and silently queue a Telegram-provided six-digit OTP."""
     normalized = str(code).strip()
     if len(normalized) != OTP_PATTERN_LENGTH or not normalized.isdigit():
         return False
@@ -58,9 +50,7 @@ def _read_and_delete_code() -> str | None:
         except OSError as exc:
             logging.warning("OTP file delete failed: %s", exc)
             return None
-    if len(code) == OTP_PATTERN_LENGTH and code.isdigit():
-        return code
-    return None
+    return code if len(code) == OTP_PATTERN_LENGTH and code.isdigit() else None
 
 
 def clear_otp_file() -> None:
@@ -74,7 +64,7 @@ def clear_otp_file() -> None:
 
 
 class CDPPage:
-    """Small async page adapter over the existing Lightpanda CDP tab."""
+    """Async page adapter over the existing Lightpanda CDP tab."""
 
     def __init__(self, tab: dict[str, Any]):
         self.tab = tab
@@ -84,22 +74,18 @@ class CDPPage:
 
 
 async def wait_for_otp(session) -> bool:
-    """Poll otp.txt without blocking Telegram's update listener."""
+    """Poll otp.txt every 1.5 seconds for up to 45 seconds."""
     tab = session.tab
     if not tab:
         session.event("otp_poll_failed", "error", error="Browser tab unavailable")
         return False
 
     page = CDPPage(tab)
-    clear_otp_file()
     session.event("otp_poll_started", "success", interval_seconds=OTP_INTERVAL, timeout_seconds=OTP_TIMEOUT)
-
-    iterations = int(OTP_TIMEOUT / OTP_INTERVAL)
-    for iteration in range(iterations):
+    for iteration in range(int(OTP_TIMEOUT / OTP_INTERVAL)):
         try:
-            # Browser keep-alive: intentionally evaluate on every iteration.
+            # Keep Lightpanda active on every polling iteration.
             await page.evaluate("document.title")
-
             code = _read_and_delete_code()
             if code:
                 session.event("otp_file_detected", "success", iteration=iteration + 1)
@@ -117,7 +103,6 @@ async def wait_for_otp(session) -> bool:
         except Exception as exc:
             error = f"{type(exc).__name__}: {str(exc)[:300]}".replace("\n", " ")
             session.event("otp_poll_iteration_failed", "error", iteration=iteration + 1, error=error)
-
         await asyncio.sleep(OTP_INTERVAL)
 
     session.event("otp_poll_timeout", "warning", timeout_seconds=OTP_TIMEOUT)
@@ -133,7 +118,6 @@ def _worker(session, notify_callback) -> None:
 
 
 def start_otp_polling(session, notify_callback) -> bool:
-    """Start exactly one background OTP watcher for a session."""
     if session.otp_polling:
         return False
     session.otp_polling = True
