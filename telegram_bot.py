@@ -145,9 +145,28 @@ def generate_after_email(chat_id: int, email: str) -> None:
     session = get(chat_id)
     if not session:
         session = create(chat_id, {})
-    session.identity["email"] = email
+
+    # The identity shown to the user before email collection is authoritative.
+    # Never silently replace a confirmed identity after the email arrives.
+    existing_identity = session.identity if isinstance(session.identity, dict) else {}
+    has_identity = bool(
+        existing_identity.get("password")
+        and existing_identity.get("date_of_birth")
+        and existing_identity.get("display_names")
+        and existing_identity.get("usernames")
+    )
+
+    audit(chat_id, "Create Account", "email_saved", existing_identity or None)
+
+    if has_identity:
+        existing_identity["email"] = email
+        session.identity = existing_identity
+        session.status = "identity_ready"
+        audit(chat_id, "Create Account", "identity_reused", session.identity)
+        tg("sendMessage", {"chat_id": chat_id, "text": "📧 Email saved.\n\n✅ Using the identity you already confirmed. No new identity was generated.\n\nReview the same account details, then continue.", "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
+        return
+
     session.status = "identity_generating"
-    audit(chat_id, "Create Account", "email_saved")
     audit(chat_id, "Create Account", "identity_generation_started")
     tg("sendMessage", {"chat_id": chat_id, "text": "📧 Email saved.\n\n⏳ Generating account details…", "parse_mode": "Markdown"})
     identity = generate_identity()
