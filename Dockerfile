@@ -13,7 +13,7 @@ COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund \
     && npx @lightpanda/browser install
 
-COPY ig_bot.py browser_assist.py stats.py workflow.py verification_bridge.py telegram_bot.py start_lightpanda.sh lightpanda_runner.js ./
+COPY ig_bot.py browser_assist.py stats.py workflow.py verification_bridge.py telegram_bot.py telegram_runner.py start_lightpanda.sh lightpanda_runner.js ./
 RUN chmod +x start_lightpanda.sh
 
 ENV CDP_HOST=127.0.0.1
