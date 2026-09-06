@@ -56,16 +56,33 @@ def cdp_call(ws, method: str, params: dict | None = None, request_id: int = 1, s
         message["sessionId"] = session_id
     ws.send(json.dumps(message))
     deadline = time.time() + 30
+    
     while time.time() < deadline:
-        incoming = json.loads(ws.recv())
-        if incoming.get("id") == request_id:
-            return incoming
+        try:
+            raw_msg = ws.recv()
+            if not raw_msg:
+                continue
+            incoming = json.loads(raw_msg)
+            
+            # Prevent silent swallowing of critical async lifecycle events
+            if "id" not in incoming:
+                event_method = incoming.get("method", "")
+                if event_method in ("Target.detachedFromTarget", "Inspector.targetCrashed", "Runtime.executionContextDestroyed"):
+                    logging.warning("CDP ASYNC EVENT: %s", event_method)
+                continue
+                
+            if incoming.get("id") == request_id:
+                return incoming
+        except Exception as e:
+            logging.error("WebSocket recv error during %s: %s", method, e)
+            raise RuntimeError(f"WebSocket failure during {method}") from e
+            
     raise TimeoutError(f"Timed out waiting for CDP response: {method}")
 
 
 def _prepare_page(tab: dict) -> None:
     for method in ("Page.enable", "Runtime.enable", "Network.enable"):
-        result = cdp_call(tab["_ws"], method, session_id=tab["sessionId"])
+        result = cdp_call(tab["_ws"], method, request_id=10, session_id=tab["sessionId"])
         if result.get("error"):
             logging.warning("%s failed: %s", method, result["error"])
 
@@ -75,12 +92,6 @@ def _socket_alive(ws) -> bool:
 
 
 def _evaluate(tab: dict, expression: str) -> Any:
-    """Evaluate only through the original persistent Lightpanda connection.
-
-    Lightpanda's local CDP targets are connection-scoped. Creating a second
-    connection and trying Target.attachToTarget on the old target can produce
-    BrowserContextNotLoaded and cannot restore the original page context.
-    """
     lock = tab.setdefault("_lock", threading.RLock())
     with lock:
         ws = tab.get("_ws")
@@ -99,45 +110,50 @@ def _evaluate(tab: dict, expression: str) -> Any:
                     request_id=100 + attempt,
                 )
                 if result.get("error"):
+                    err_msg = result['error'].get('message', '')
+                    # If context is temporarily missing due to redirect, wait and retry
+                    if "BrowserContextNotLoaded" in err_msg or "Cannot find context" in err_msg:
+                        raise RuntimeError(f"Context missing (redirect in progress?): {err_msg}")
                     raise RuntimeError(f"CDP Runtime.evaluate failed: {result['error']}")
                 return result.get("result", {}).get("result", {}).get("value")
             except Exception as exc:
                 last_error = exc
-                logging.warning("CDP evaluate attempt %d/3 failed: %s", attempt + 1, exc)
                 if attempt < 2:
-                    time.sleep(0.25)
+                    time.sleep(1.0) # Increased backoff for redirects
                     continue
 
         if not _socket_alive(ws):
             raise RuntimeError("Lightpanda CDP connection closed; the connection-scoped target cannot be reattached") from last_error
-        raise RuntimeError(f"CDP Runtime.evaluate failed: {type(last_error).__name__}: {last_error}") from last_error
+        raise RuntimeError(f"CDP Runtime.evaluate failed after 3 attempts: {last_error}") from last_error
 
 
-def start_keepalive(tab: dict, interval: float = 1.5) -> tuple[threading.Event, threading.Thread]:
-    """Keep the existing Lightpanda target alive without creating a new CDP connection."""
+def start_keepalive(tab: dict, interval: float = 15.0) -> tuple[threading.Event, threading.Thread]:
+    """Use native WebSocket ping instead of intrusive CDP Runtime.evaluate polling."""
     stop_event = tab.setdefault("_keepalive_stop", threading.Event())
     existing = tab.get("_keepalive_thread")
     if existing and existing.is_alive():
         return stop_event, existing
 
-    if tab.get("_ws") is None or not tab.get("sessionId"):
-        logging.warning("Lightpanda keepalive not started: original CDP session is unavailable")
+    if tab.get("_ws") is None:
+        logging.warning("Keepalive not started: Original connection unavailable")
         return stop_event, threading.current_thread()
 
     def _loop() -> None:
-        logging.info("Lightpanda keepalive started for target %s", tab.get("targetId") or tab.get("id"))
+        logging.info("Network keepalive started for WS connection")
         while not stop_event.is_set():
             try:
-                _evaluate(tab, "document.title")
-            except Exception as exc:
-                logging.warning("Lightpanda keepalive check failed: %s", exc)
-                if not _socket_alive(tab.get("_ws")):
-                    logging.warning("Lightpanda keepalive stopped: connection closed; no CDP reattach will be attempted")
+                ws = tab.get("_ws")
+                if ws and _socket_alive(ws):
+                    ws.ping() # Safe network-level ping, doesn't touch V8 engine
+                else:
+                    logging.warning("Keepalive stopped: Connection dead")
                     break
+            except Exception as exc:
+                logging.warning("Keepalive ping failed: %s", exc)
+                break
             stop_event.wait(interval)
-        logging.info("Lightpanda keepalive stopped for target %s", tab.get("targetId") or tab.get("id"))
 
-    thread = threading.Thread(target=_loop, name="lightpanda-keepalive", daemon=True)
+    thread = threading.Thread(target=_loop, name="ws-keepalive", daemon=True)
     tab["_keepalive_thread"] = thread
     thread.start()
     return stop_event, thread
@@ -183,7 +199,11 @@ def open_url(url: str) -> dict:
             if navigated.get("error"):
                 raise RuntimeError(f"CDP Page.navigate failed: {navigated['error']}")
             time.sleep(5)
+            
+            # Start the new network-level keepalive
+            start_keepalive(tab)
             return tab
+            
         except WebSocketBadStatusException as exc:
             status = getattr(exc, "status_code", None)
             headers = getattr(exc, "resp_headers", None)
@@ -336,11 +356,14 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
     values = {"email": email, "password": password, "username": username, "fullName": str(full_name), "dob": str(dob or "")}
     last_result = None
     for attempt in range(15):
-        result = _evaluate(tab, f"({expression})({json.dumps(values)})")
-        last_result = result
-        logging.info("Signup fields attempt %d: %s", attempt + 1, result)
-        if result and result.get("email") and result.get("password") and result.get("username"):
-            return True
+        try:
+            result = _evaluate(tab, f"({expression})({json.dumps(values)})")
+            last_result = result
+            logging.info("Signup fields attempt %d: %s", attempt + 1, result)
+            if result and result.get("email") and result.get("password") and result.get("username"):
+                return True
+        except Exception as e:
+            logging.warning("Signup fields evaluation error on attempt %d: %s", attempt + 1, e)
         time.sleep(1)
     logging.error("Signup fields could not be filled after 15 attempts: %s", last_result)
     return False
@@ -382,18 +405,22 @@ def fill_otp(tab: dict, otp: str) -> bool:
 
 
 def inspect_state(tab: dict) -> dict:
-    value = _evaluate(tab, "JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,4000)})")
-    data = json.loads(value or "{}")
-    text = data.get("text", "").lower()
-    if any(x in text for x in ("security code", "confirmation code", "enter the code", "confirm your email")):
-        status = "otp_required"
-    elif "captcha" in text:
-        status = "captcha_required"
-    elif "welcome to instagram" in text:
-        status = "completed"
-    else:
-        status = "waiting"
-    return {"status": status, "url": data.get("url", ""), "title": data.get("title", "")}
+    try:
+        value = _evaluate(tab, "JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,4000)})")
+        data = json.loads(value or "{}")
+        text = data.get("text", "").lower()
+        if any(x in text for x in ("security code", "confirmation code", "enter the code", "confirm your email")):
+            status = "otp_required"
+        elif "captcha" in text:
+            status = "captcha_required"
+        elif "welcome to instagram" in text:
+            status = "completed"
+        else:
+            status = "waiting"
+        return {"status": status, "url": data.get("url", ""), "title": data.get("title", "")}
+    except Exception as e:
+        logging.warning("inspect_state failed (redirecting?): %s", e)
+        return {"status": "waiting", "url": "", "title": ""}
 
 
 def start_signup(credentials: dict[str, str], identity: dict[str, Any] | None = None) -> tuple[dict, bool]:
