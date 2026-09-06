@@ -46,7 +46,7 @@ def _browser_ws_url() -> str:
 
 
 def _create_browser_connection():
-    return create_connection(_browser_ws_url(), timeout=20, http_proxy_host=None, http_proxy_port=None, http_no_proxy=["127.0.0.1", "localhost"], suppress_origin=True)
+    return create_connection(_browser_ws_url(), timeout=30, http_proxy_host=None, http_proxy_port=None, http_no_proxy=["127.0.0.1", "localhost"], suppress_origin=True)
 
 
 def cdp_call(ws, method: str, params: dict | None = None, request_id: int = 1, session_id: str | None = None) -> dict:
@@ -54,20 +54,62 @@ def cdp_call(ws, method: str, params: dict | None = None, request_id: int = 1, s
     if session_id:
         message["sessionId"] = session_id
     ws.send(json.dumps(message))
-    deadline = time.time() + 15
+    deadline = time.time() + 30
     while time.time() < deadline:
         incoming = json.loads(ws.recv())
+        # CDP sends asynchronous events on the same socket. Ignore them until
+        # the response for this request arrives.
         if incoming.get("id") == request_id:
             return incoming
     raise TimeoutError(f"Timed out waiting for CDP response: {method}")
+
+
+def _attach_existing_target(tab: dict) -> None:
+    """Reattach to an existing Lightpanda target if its websocket was lost."""
+    target_id = tab.get("targetId") or tab.get("id")
+    if not target_id:
+        raise RuntimeError("CDP tab has no target id")
+    old_ws = tab.get("_ws")
+    if old_ws is not None:
+        try:
+            old_ws.close()
+        except Exception:
+            pass
+    ws = _create_browser_connection()
+    attached = cdp_call(ws, "Target.attachToTarget", {"targetId": target_id, "flatten": True}, request_id=1)
+    if attached.get("error"):
+        ws.close()
+        raise RuntimeError(f"CDP reattach failed: {attached['error']}")
+    session_id = attached.get("result", {}).get("sessionId")
+    if not session_id:
+        ws.close()
+        raise RuntimeError("CDP reattach returned no sessionId")
+    tab["_ws"] = ws
+    tab["sessionId"] = session_id
+    tab["targetId"] = target_id
+    tab["id"] = target_id
+    _prepare_page(tab)
+    logging.info("Reattached CDP target %s", target_id)
 
 
 def _evaluate(tab: dict, expression: str) -> Any:
     ws = tab.get("_ws")
     session_id = tab.get("sessionId")
     if ws is None or not session_id:
-        raise RuntimeError("CDP tab has no live browser websocket/session")
-    result = cdp_call(ws, "Runtime.evaluate", {"expression": expression, "returnByValue": True}, session_id=session_id)
+        _attach_existing_target(tab)
+    try:
+        result = cdp_call(tab["_ws"], "Runtime.evaluate", {"expression": expression, "returnByValue": True}, session_id=tab["sessionId"])
+    except Exception as first_error:
+        # A long-lived Telegram flow can outlive the websocket connection even
+        # though the Lightpanda page/target is still alive. Reattach once and
+        # retry the same read instead of reporting a false "Session Check"
+        # failure.
+        logging.warning("CDP evaluate failed; attempting target reattach: %s", first_error)
+        try:
+            _attach_existing_target(tab)
+            result = cdp_call(tab["_ws"], "Runtime.evaluate", {"expression": expression, "returnByValue": True}, session_id=tab["sessionId"])
+        except Exception as second_error:
+            raise RuntimeError(f"CDP Runtime.evaluate failed after reconnect: {type(second_error).__name__}: {second_error}") from second_error
     if result.get("error"):
         raise RuntimeError(f"CDP Runtime.evaluate failed: {result['error']}")
     return result.get("result", {}).get("result", {}).get("value")
@@ -356,7 +398,3 @@ def main() -> int:
     except (requests.RequestException, OSError, TimeoutError, json.JSONDecodeError, RuntimeError, WebSocketBadStatusException) as exc:
         print(f"Signup assistant failed: {exc}", file=sys.stderr)
         return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
