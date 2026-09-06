@@ -55,18 +55,16 @@ def _call(ws, method, params=None, request_id=1, session_id=None):
     raise TimeoutError(f"CDP timeout: {method}")
 
 
-# Public compatibility API used by verification_bridge.py.
-# It deliberately operates on the already-owned websocket; it never creates
-# a second browser connection or attempts an unsupported reattach.
 def cdp_call(ws, method, params=None, request_id=1, session_id=None):
     return _call(ws, method, params, request_id=request_id, session_id=session_id)
 
 
 def _eval(tab: dict, expression: str) -> Any:
-    with tab.setdefault("_lock", threading.RLock()):
+    lock = tab.setdefault("_lock", threading.RLock())
+    with lock:
         ws, sid = tab.get("_ws"), tab.get("sessionId")
         if ws is None or not sid:
-            raise RuntimeError("Lightpanda CDP session is unavailable")
+            raise RuntimeError("Lightpanda CDP session is unavailable; connection is closed")
         last = None
         for attempt in range(3):
             try:
@@ -76,15 +74,19 @@ def _eval(tab: dict, expression: str) -> Any:
                 last = result["error"]
             except Exception as exc:
                 last = exc
+                if isinstance(exc, (BrokenPipeError, ConnectionError, OSError)):
+                    tab["_connection_dead"] = True
+                    tab["_ws"] = None
+                    tab["sessionId"] = None
+                    raise RuntimeError("Lightpanda CDP connection closed; connection-scoped target cannot be reattached") from exc
             time.sleep(0.4)
         raise RuntimeError(f"Runtime.evaluate failed: {last}")
 
 
-# Backwards-compatible private alias retained for existing imports.
 _evaluate = _eval
 
 
-def start_keepalive(tab: dict, interval: float = 15.0):
+def start_keepalive(tab: dict, interval: float = 10.0):
     stop = tab.setdefault("_keepalive_stop", threading.Event())
     old = tab.get("_keepalive_thread")
     if old and old.is_alive():
@@ -92,16 +94,25 @@ def start_keepalive(tab: dict, interval: float = 15.0):
     ws = tab.get("_ws")
     if ws is None:
         return stop, threading.current_thread()
+
     def loop():
-        logging.info("Network keepalive started for WS connection")
+        logging.info("Network keepalive started for original Lightpanda WS connection")
         while not stop.is_set() and tab.get("_ws") is ws:
             try:
                 ws.ping()
             except Exception as exc:
-                logging.warning("Keepalive ping failed: %s", exc)
+                tab["_connection_dead"] = True
+                logging.warning("Lightpanda original WS closed: %s", exc)
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+                tab["_ws"] = None
+                tab["sessionId"] = None
                 break
             stop.wait(interval)
-    thread = threading.Thread(target=loop, name="ws-keepalive", daemon=True)
+
+    thread = threading.Thread(target=loop, name="lightpanda-ws-keepalive", daemon=True)
     tab["_keepalive_thread"] = thread
     thread.start()
     return stop, thread
@@ -128,17 +139,34 @@ def open_url(url: str) -> dict:
             sid = attached.get("result", {}).get("sessionId")
             if not sid:
                 raise RuntimeError(str(attached.get("error") or "No sessionId"))
-            tab = {"id": target, "targetId": target, "sessionId": sid, "type": "page", "url": url, "browserWebSocketDebuggerUrl": _ws_url(), "_ws": ws, "_lock": threading.RLock(), "_signup_stop": threading.Event(), "_signup_thread": None, "_attempted_usernames": set()}
+            tab = {
+                "id": target,
+                "targetId": target,
+                "sessionId": sid,
+                "type": "page",
+                "url": url,
+                "browserWebSocketDebuggerUrl": _ws_url(),
+                "_ws": ws,
+                "_lock": threading.RLock(),
+                "_signup_stop": threading.Event(),
+                "_signup_thread": None,
+                "_attempted_usernames": set(),
+                "_connection_dead": False,
+            }
             for rid, method in enumerate(("Page.enable", "Runtime.enable", "Network.enable"), 10):
                 _call(ws, method, request_id=rid, session_id=sid)
             logging.info("Lightpanda signup target attached; original CDP connection retained")
+            start_keepalive(tab, interval=10.0)
             return tab
         except (WebSocketBadStatusException, requests.RequestException, OSError, RuntimeError, TimeoutError, ValueError) as exc:
             last = exc
             if ws:
-                try: ws.close()
-                except Exception: pass
-            if attempt < 2: time.sleep(1)
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            if attempt < 2:
+                time.sleep(1)
     raise last or RuntimeError("Unable to open Lightpanda tab")
 
 
@@ -149,11 +177,14 @@ def open_signup():
 def close_tab(tab: dict):
     stop_keepalive(tab)
     stop = tab.get("_signup_stop")
-    if stop: stop.set()
+    if stop:
+        stop.set()
     ws = tab.get("_ws")
     if ws:
-        try: ws.close()
-        except Exception: pass
+        try:
+            ws.close()
+        except Exception:
+            pass
     tab["_ws"] = None
     tab["sessionId"] = None
 
@@ -169,7 +200,8 @@ def _match(item: dict, *words: str) -> bool:
 
 
 def _set_input(tab: dict, item: dict, value: str) -> bool:
-    if not value: return False
+    if not value:
+        return False
     payload = json.dumps({k: str(item.get(k) or "") for k in ("name", "autocomplete", "aria", "placeholder")} | {"value": str(value)})
     expr = "(p)=>{const a=[['name',p.name],['autocomplete',p.autocomplete],['aria-label',p.aria],['placeholder',p.placeholder]];let el=null;for(const [k,v] of a){if(v){el=document.querySelector('input['+k+'=\"'+CSS.escape(v)+'\"]');if(el)break;}}if(!el)return false;const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;if(s)s.call(el,p.value);else el.value=p.value;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));return true;}"
     return bool(_eval(tab, expr + f"({payload})"))
@@ -196,15 +228,19 @@ def _username_rejected(text: str) -> bool:
 def _handle_username(tab: dict, identity: dict) -> str:
     snap=_snapshot(tab)
     item=next((i for i in snap.get("inputs",[]) if i.get("tag")=="INPUT" and _match(i,"username","user name","handle","screen name")),None)
-    if not item: return "username_waiting"
+    if not item:
+        return "username_waiting"
     attempted=tab.setdefault("_attempted_usernames",set())
     for candidate in _candidates(identity):
-        if candidate.lower() in attempted: continue
+        if candidate.lower() in attempted:
+            continue
         attempted.add(candidate.lower())
-        if not _set_input(tab,item,candidate): continue
+        if not _set_input(tab,item,candidate):
+            continue
         time.sleep(0.8)
         if _username_rejected(str(_snapshot(tab).get("text",""))):
-            logging.info("Username rejected: %s",candidate); continue
+            logging.info("Username rejected: %s",candidate)
+            continue
         identity["selected_username"]=candidate; identity["username"]=candidate
         logging.info("Username selected at username step: %s",candidate)
         _click_primary(tab)
@@ -214,75 +250,105 @@ def _handle_username(tab: dict, identity: dict) -> str:
 
 def _advance(tab: dict, credentials: dict, identity: dict) -> str:
     snap=_snapshot(tab); text=str(snap.get("text","")); low=text.lower(); inputs=snap.get("inputs",[])
-    if any(x in low for x in ("confirmation code","security code","enter the code","confirm your email")): return "otp_required"
-    if "captcha" in low or "security check" in low: return "captcha_required"
-    if any(x in low for x in ("welcome to instagram","account created","your instagram profile")): return "completed"
-    email=str(credentials.get("email") or identity.get("email") or "")
-    password=str(credentials.get("password") or identity.get("password") or "")
-    email_item=next((i for i in inputs if i.get("tag")=="INPUT" and _match(i,"email","emailorphone","e-mail")),None)
-    password_item=next((i for i in inputs if i.get("tag")=="INPUT" and _match(i,"password","new-password")),None)
-    username_item=next((i for i in inputs if i.get("tag")=="INPUT" and _match(i,"username","user name","handle","screen name")),None)
-    if email_item and email and not password_item:
-        if _set_input(tab,email_item,email): _click_primary(tab); return "email_submitted"
-    if password_item and password:
-        if _set_input(tab,password_item,password): _click_primary(tab); return "password_submitted"
-    if username_item and not identity.get("selected_username"):
-        return _handle_username(tab,identity)
+    if any(x in low for x in ("confirmation code","security code","enter the code","confirm your email")):
+        return "otp_required"
+    if "captcha" in low or "security check" in low:
+        return "captcha_required"
+    if any(x in low for x in ("welcome to instagram","account created","your instagram profile")):
+        return "completed"
+    password=next((i for i in inputs if i.get("tag")=="INPUT" and str(i.get("type")).lower()=="password"),None)
+    if password:
+        if _set_input(tab,password,str(credentials.get("password") or identity.get("password") or "")):
+            _click_primary(tab)
+            return "progressed"
+    email=next((i for i in inputs if i.get("tag")=="INPUT" and _match(i,"email")),None)
+    if email:
+        if _set_input(tab,email,str(credentials.get("email") or identity.get("email") or "")):
+            _click_primary(tab)
+            return "progressed"
+    username_result=_handle_username(tab,identity)
+    if username_result != "username_waiting":
+        return username_result
+    fullname=next((i for i in inputs if i.get("tag")=="INPUT" and _match(i,"full name","fullname","name")),None)
+    if fullname and identity.get("display_names"):
+        if _set_input(tab,fullname,str(identity["display_names"][0])):
+            _click_primary(tab)
+            return "progressed"
     return "waiting"
 
 
-def _worker(tab: dict, credentials: dict, identity: dict):
+def _signup_worker(tab: dict, credentials: dict, identity: dict):
     logging.info("Instagram signup progression worker started")
-    deadline=time.time()+float(os.getenv("SIGNUP_FLOW_TIMEOUT","900")); last=None
-    while not tab.get("_signup_stop",threading.Event()).is_set() and time.time()<deadline:
+    stop=tab.get("_signup_stop")
+    while stop and not stop.is_set():
         try:
-            state=_advance(tab,credentials,identity); tab["signup_state"]=state
-            if state!=last: logging.info("Instagram signup state: %s",state); last=state
-            if state=="completed": tab["signup_done"]=True; return
+            state=_advance(tab,credentials,identity)
+            tab["signup_state"]=state
+            logging.info("Instagram signup state: %s",state)
+            if state in {"otp_required","captcha_required","completed"}:
+                return
+            if tab.get("_connection_dead"):
+                logging.warning("Signup progression stopped: original Lightpanda CDP connection is closed")
+                return
         except Exception as exc:
-            logging.warning("Signup progression iteration failed: %s: %s",type(exc).__name__,str(exc)[:300])
-        time.sleep(1.5)
+            logging.warning("Signup progression iteration failed: %s",exc)
+            if tab.get("_connection_dead"):
+                return
+        stop.wait(1.5)
 
 
 def start_signup_progression(tab: dict, credentials: dict, identity: dict):
     old=tab.get("_signup_thread")
-    if old and old.is_alive(): return old
-    thread=threading.Thread(target=_worker,args=(tab,credentials or {},identity or {}),name="instagram-signup-flow",daemon=True)
-    tab["_signup_thread"]=thread; thread.start(); return thread
+    if old and old.is_alive():
+        return old
+    thread=threading.Thread(target=_signup_worker,args=(tab,credentials,identity),name="instagram-signup",daemon=True)
+    tab["_signup_thread"]=thread
+    thread.start()
+    return thread
 
 
-def fill_fields(tab: dict, credentials: dict|None=None, identity: dict[str,Any]|None=None) -> bool:
-    state=_advance(tab,credentials or {},identity or {})
-    logging.info("Signup initial UI state: %s",state)
-    return state not in {"waiting","username_waiting"}
+def fill_fields(tab: dict, credentials: dict, identity: dict | None = None) -> bool:
+    state=_advance(tab,credentials,identity or {})
+    tab["signup_state"]=state
+    return state in {"progressed","otp_required","captcha_required","completed","username_submitted"}
 
 
 def submit_signup(tab: dict) -> bool:
     return _click_primary(tab)
 
 
-def fill_otp(tab: dict, otp: str) -> bool:
-    otp=str(otp).strip()
-    if len(otp)!=6 or not otp.isdigit(): return False
-    payload=json.dumps(otp)
-    expr="(code)=>{const el=[...document.querySelectorAll('input')].find(x=>/code|otp|confirmation|security/i.test((x.name||'')+' '+(x.placeholder||'')+' '+(x.getAttribute('aria-label')||'')))||[...document.querySelectorAll('input')].find(x=>x.inputMode==='numeric'||x.type==='number'||x.type==='tel');if(!el)return {filled:false};const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;if(s)s.call(el,code);else el.value=code;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));const b=[...document.querySelectorAll('button,[role=\"button\"]')].find(x=>!x.disabled&&/confirm|continue|next|submit|verify/i.test(x.innerText||x.textContent||x.getAttribute('aria-label')||''));if(b)b.click();return {filled:true};}"
-    result=_eval(tab,expr+f"({payload})")
-    return bool(result and result.get("filled"))
+def fill_otp(tab: dict, code: str) -> bool:
+    payload=json.dumps(str(code).strip())
+    expr="(code)=>{const inputs=[...document.querySelectorAll('input')].filter(x=>!x.disabled&&x.offsetParent!==null);const el=inputs.find(x=>/otp|code|confirmation|verification/i.test((x.name||'')+' '+(x.autocomplete||'')+' '+(x.placeholder||'')+' '+(x.getAttribute('aria-label')||'')))||inputs.find(x=>x.maxLength===6)||inputs[0];if(!el)return false;const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;if(s)s.call(el,code);else el.value=code;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));const b=[...document.querySelectorAll('button,[role=\"button\"]')].find(x=>/^(confirm|continue|next|submit|verify)$/i.test((x.innerText||x.textContent||'').trim())&&!x.disabled);if(b)b.click();return true;}"
+    return bool(_eval(tab,expr+f"({payload})"))
 
 
 def inspect_state(tab: dict) -> dict:
-    value=_eval(tab,"JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,4000)})")
-    data=json.loads(value or "{}"); text=str(data.get("text"," ")).lower()
-    if any(x in text for x in ("security code","confirmation code","enter the code","confirm your email")): status="otp_required"
-    elif "captcha" in text or "security check" in text: status="captcha_required"
-    elif tab.get("signup_done") or any(x in text for x in ("welcome to instagram","account created","your instagram profile")): status="completed"
-    else: status=tab.get("signup_state","waiting")
-    return {"status":status,"url":data.get("url",""),"title":data.get("title","")}
-
-
-def start_signup(credentials: dict[str,str], identity: dict[str,Any]|None=None):
-    cdp_version(); tab=open_signup()
     try:
-        start_signup_progression(tab,credentials or {},identity or {}); time.sleep(0.8); return tab,True
-    except Exception:
-        close_tab(tab); raise
+        snap=_snapshot(tab); text=str(snap.get("text","")).lower()
+        if any(x in text for x in ("confirmation code","security code","enter the code","confirm your email")):
+            status="otp_required"
+        elif "captcha" in text or "security check" in text:
+            status="captcha_required"
+        elif any(x in text for x in ("welcome to instagram","account created","your instagram profile")):
+            status="completed"
+        else:
+            status=str(tab.get("signup_state") or "waiting")
+        return {"status":status,"url":snap.get("url",tab.get("url","")),"title":snap.get("title","")}
+    except Exception as exc:
+        return {"status":"connection_closed" if tab.get("_connection_dead") else "waiting","url":"","title":"","error":str(exc)[:300]}
+
+
+def start_signup(credentials: dict, identity: dict):
+    tab=open_signup()
+    start_signup_progression(tab,credentials,identity)
+    time.sleep(0.8)
+    return tab,True
+
+
+def main():
+    print(cdp_version())
+
+
+if __name__ == "__main__":
+    main()
