@@ -11,7 +11,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 for _ in $(seq 1 30); do
-  if python - <<'PY'
+  if python3 - <<'PY'
 import requests
 try:
     r = requests.get('http://127.0.0.1:9222/json/version', timeout=1)
@@ -29,11 +29,11 @@ PY
   sleep 1
 done
 
-python - <<'PY'
+python3 - <<'PY'
 import requests
 r = requests.get('http://127.0.0.1:9222/json/version', timeout=2)
 r.raise_for_status()
 print('Lightpanda CDP is ready:', r.json().get('Browser', 'unknown'))
 PY
 
-exec python -u telegram_bot.py
+exec python3 -u telegram_bot.py
