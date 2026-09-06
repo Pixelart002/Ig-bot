@@ -1,8 +1,8 @@
 """Authenticated manual verification bridge and Telegram webhook server."""
 from __future__ import annotations
 
-import base64
 import hashlib
+import json
 import os
 import threading
 from html import escape
@@ -29,15 +29,21 @@ class TextInput(BaseModel):
 
 def session_for(token: str):
     session = by_token(token)
-    if not session or not session.tab or not session.tab.get("webSocketDebuggerUrl"):
+    tab = session.tab if session else None
+    if not session or not tab or not tab.get("_ws") or not tab.get("sessionId"):
         raise HTTPException(status_code=404, detail="Session expired or unavailable")
     touch(session)
     return session
 
 
 def ws_for(session):
-    import websocket
-    return websocket.create_connection(session.tab["webSocketDebuggerUrl"], timeout=15)
+    """Use the live browser-level CDP websocket owned by browser_assist."""
+    tab = session.tab or {}
+    ws = tab.get("_ws")
+    session_id = tab.get("sessionId")
+    if ws is None or not session_id:
+        raise HTTPException(status_code=404, detail="Browser CDP session unavailable")
+    return ws, session_id
 
 
 def telegram_webhook_secret() -> str:
@@ -59,7 +65,6 @@ def telegram_webhook(update: dict, x_telegram_bot_api_secret_token: str | None =
     if not expected or x_telegram_bot_api_secret_token != expected:
         raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret")
 
-    # Import lazily to avoid verification_bridge <-> telegram_bot import cycle.
     import telegram_bot as bot
 
     try:
@@ -104,49 +109,44 @@ refresh(); setInterval(refresh,2500);
 @app.get("/v/{token}/state")
 def state(token: str):
     session = session_for(token)
-    ws = ws_for(session)
-    try:
-        result = cdp_call(ws, "Runtime.evaluate", {"expression": "JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,1200)})", "returnByValue": True})
-        value = result.get("result", {}).get("result", {}).get("value", "{}")
-        import json
-        data = json.loads(value)
-        text = data.get("text", "").lower()
-        if any(x in text for x in ("security code", "confirmation code", "enter the code", "captcha", "confirm your email")):
-            status = "verification_required"
-        elif "welcome to instagram" in text:
-            status = "completed"
-        else:
-            status = session.status
-        session.status = status
-        return {"status": status, "url": data.get("url", ""), "title": data.get("title", "")}
-    finally:
-        ws.close()
+    ws, session_id = ws_for(session)
+    result = cdp_call(
+        ws,
+        "Runtime.evaluate",
+        {"expression": "JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,1200)})", "returnByValue": True},
+        session_id=session_id,
+    )
+    value = result.get("result", {}).get("result", {}).get("value", "{}")
+    data = json.loads(value)
+    text = data.get("text", "").lower()
+    if any(x in text for x in ("security code", "confirmation code", "enter the code", "captcha", "confirm your email")):
+        status = "verification_required"
+    elif "welcome to instagram" in text:
+        status = "completed"
+    else:
+        status = session.status
+    session.status = status
+    return {"status": status, "url": data.get("url", ""), "title": data.get("title", "")}
 
 
 @app.get("/v/{token}/screenshot")
 def screenshot(token: str):
     session = session_for(token)
-    ws = ws_for(session)
-    try:
-        result = cdp_call(ws, "Page.captureScreenshot", {"format": "png"})
-        image = result.get("result", {}).get("data")
-        if not image:
-            raise HTTPException(status_code=502, detail="Screenshot unavailable")
-        return {"image": image}
-    finally:
-        ws.close()
+    ws, session_id = ws_for(session)
+    result = cdp_call(ws, "Page.captureScreenshot", {"format": "png"}, session_id=session_id)
+    image = result.get("result", {}).get("data")
+    if not image:
+        raise HTTPException(status_code=502, detail="Screenshot unavailable")
+    return {"image": image}
 
 
 @app.post("/v/{token}/click")
 def click(token: str, point: Point):
     session = session_for(token)
-    ws = ws_for(session)
-    try:
-        cdp_call(ws, "Input.dispatchMouseEvent", {"type": "mousePressed", "x": point.x, "y": point.y, "button": "left", "clickCount": 1})
-        cdp_call(ws, "Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point.x, "y": point.y, "button": "left", "clickCount": 1}, request_id=2)
-        return {"ok": True}
-    finally:
-        ws.close()
+    ws, session_id = ws_for(session)
+    cdp_call(ws, "Input.dispatchMouseEvent", {"type": "mousePressed", "x": point.x, "y": point.y, "button": "left", "clickCount": 1}, session_id=session_id)
+    cdp_call(ws, "Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point.x, "y": point.y, "button": "left", "clickCount": 1}, request_id=2, session_id=session_id)
+    return {"ok": True}
 
 
 @app.post("/v/{token}/text")
@@ -154,12 +154,9 @@ def text(token: str, body: TextInput):
     if len(body.text) > 200:
         raise HTTPException(status_code=400, detail="Input too long")
     session = session_for(token)
-    ws = ws_for(session)
-    try:
-        cdp_call(ws, "Input.insertText", {"text": body.text})
-        return {"ok": True}
-    finally:
-        ws.close()
+    ws, session_id = ws_for(session)
+    cdp_call(ws, "Input.insertText", {"text": body.text}, session_id=session_id)
+    return {"ok": True}
 
 
 @app.post("/v/{token}/key")
@@ -168,13 +165,10 @@ def key(token: str, key: str):
     if key not in allowed:
         raise HTTPException(status_code=400, detail="Key not allowed")
     session = session_for(token)
-    ws = ws_for(session)
-    try:
-        cdp_call(ws, "Input.dispatchKeyEvent", {"type": "keyDown", "key": key})
-        cdp_call(ws, "Input.dispatchKeyEvent", {"type": "keyUp", "key": key}, request_id=2)
-        return {"ok": True}
-    finally:
-        ws.close()
+    ws, session_id = ws_for(session)
+    cdp_call(ws, "Input.dispatchKeyEvent", {"type": "keyDown", "key": key}, session_id=session_id)
+    cdp_call(ws, "Input.dispatchKeyEvent", {"type": "keyUp", "key": key}, request_id=2, session_id=session_id)
+    return {"ok": True}
 
 
 def start_bridge() -> None:
