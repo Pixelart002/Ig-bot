@@ -22,6 +22,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API = f"https://api.telegram.org/bot{TOKEN}" if TOKEN else ""
 PUBLIC_BASE_URL = os.getenv("VERIFICATION_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).rstrip("/")
 LOGIN_URL = "https://www.instagram.com/accounts/login/"
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 def tg(method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -84,6 +85,10 @@ def verification_link(session) -> str:
     return f"{PUBLIC_BASE_URL}/v/{session.bridge_token}"
 
 
+def send_email_prompt(chat_id: int) -> None:
+    tg("sendMessage", {"chat_id": chat_id, "text": "📧 *Email required*\n\nSend the email address you want to use for this registration. No fixed `IG_EMAIL` is required.", "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": "cancel_session"}]]}})
+
+
 def send_otp_prompt(chat_id: int, session, status: str = "otp_required") -> None:
     session.status = status
     record("otp_requested")
@@ -99,16 +104,24 @@ def send_otp_prompt(chat_id: int, session, status: str = "otp_required") -> None
 
 def handle_create(chat_id: int) -> None:
     record("signup_started")
+    audit(chat_id, "Create Account", "awaiting_email")
+    session = create(chat_id, {"awaiting_email": True})
+    tg("sendMessage", {"chat_id": chat_id, "text": "🆕 *Create Account*\n\nFirst, send the email address you want to register with.", "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": "cancel_session"}]]}})
+
+
+def generate_after_email(chat_id: int, email: str) -> None:
     audit(chat_id, "Create Account", "identity_generation_started")
     identity = generate_identity()
     if not identity:
         record("signup_failed")
         audit(chat_id, "Create Account", "identity_generation_failed")
+        clear(chat_id)
         tg("sendMessage", {"chat_id": chat_id, "text": "❌ Could not generate signup details."})
         return
+    identity["email"] = email
     create(chat_id, identity)
     audit(chat_id, "Create Account", "identity_generated", identity)
-    tg("sendMessage", {"chat_id": chat_id, "text": "🆕 *Account Details*\n\n" + identity_text(identity) + "\n\nPress *Confirm & Create* to continue.", "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "✅ Confirm & Create", "callback_data": "confirm_create"}], [{"text": "🔄 Regenerate", "callback_data": "create"}]]}})
+    tg("sendMessage", {"chat_id": chat_id, "text": "🆕 *Account Details*\n\n" + identity_text(identity) + f"\n*Email:* `{email}`\n\nPress *Confirm & Create* to continue.", "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "✅ Confirm & Create", "callback_data": "confirm_create"}], [{"text": "🔄 Regenerate", "callback_data": "create"}]]}})
 
 
 def handle_callback(callback: dict[str, Any]) -> None:
@@ -148,7 +161,11 @@ def handle_callback(callback: dict[str, Any]) -> None:
         record("confirmed")
         audit(chat_id, "Create Account", "confirmed", session.identity)
         try:
-            credentials = {"email": os.getenv("IG_EMAIL", ""), "password": str(session.identity.get("password", "")), "username": str((session.identity.get("usernames") or [""])[0]), "full_name": str((session.identity.get("display_names") or [""])[0])}
+            credentials = {"email": str(session.identity.get("email", "")), "password": str(session.identity.get("password", "")), "username": str((session.identity.get("usernames") or [""])[0]), "full_name": str((session.identity.get("display_names") or [""])[0])}
+            if not credentials["email"]:
+                session.status = "awaiting_email"
+                send_email_prompt(chat_id)
+                return
             tab, filled = start_signup(credentials, session.identity)
             session.tab = tab
             session.status = "form_filled" if filled else "waiting"
@@ -246,6 +263,17 @@ def handle_message(message: dict[str, Any]) -> None:
         return
 
     session = get(chat_id)
+    if session and session.status == "awaiting_email":
+        if not EMAIL_RE.fullmatch(text):
+            tg("sendMessage", {"chat_id": chat_id, "text": "❌ That doesn't look like a valid email. Please send a valid email address."})
+            return
+        session.identity = {}
+        session.identity["email"] = text.lower()
+        audit(chat_id, "Create Account", "email_received")
+        tg("sendMessage", {"chat_id": chat_id, "text": "⏳ Email received. Generating the account details…"})
+        generate_after_email(chat_id, text.lower())
+        return
+
     if session and session.tab and session.status == "otp_required" and re.fullmatch(r"[A-Za-z0-9]{4,32}", text):
         try:
             if fill_otp(session.tab, text):
@@ -265,16 +293,19 @@ def handle_message(message: dict[str, Any]) -> None:
                     audit(chat_id, "Create Account", "captcha_required", session.identity)
                     tg("sendMessage", {"chat_id": chat_id, "text": "⚠️ OTP accepted, but CAPTCHA/another manual verification step is required. Complete it manually, then send `/completed`."})
                 elif state["status"] == "otp_required":
-                    tg("sendMessage", {"chat_id": chat_id, "text": "⚠️ The page still requests a verification code. Send the current OTP again."})
+                    send_otp_prompt(chat_id, session)
                 else:
                     tg("sendMessage", {"chat_id": chat_id, "text": "⏳ OTP submitted. Continue any remaining manual step, then send `/completed`."})
             else:
                 audit(chat_id, "Create Account", "otp_field_not_found", session.identity)
-                tg("sendMessage", {"chat_id": chat_id, "text": "❌ I couldn't find the OTP field. Open the verification session and send `/completed` once the OTP screen is visible."})
+                tg("sendMessage", {"chat_id": chat_id, "text": "❌ Could not find the OTP field. Open the verification session and send `/completed` after reaching the code screen."})
         except Exception as exc:
             audit(chat_id, "Create Account", "otp_submit_failed", session.identity)
-            tg("sendMessage", {"chat_id": chat_id, "text": f"❌ OTP handoff failed: {type(exc).__name__}"})
+            tg("sendMessage", {"chat_id": chat_id, "text": f"❌ OTP submission failed: {type(exc).__name__}"})
         return
+
+    if text:
+        tg("sendMessage", {"chat_id": chat_id, "text": "ℹ️ Use /menu to choose an action, or /cancel to stop the current session."})
 
 
 def main() -> None:
