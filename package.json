@@ -1,0 +1,11 @@
+{
+  "name": "ig-bot-lightpanda",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "browser": "node lightpanda_runner.js"
+  },
+  "dependencies": {
+    "@lightpanda/browser": "latest"
+  }
+}
