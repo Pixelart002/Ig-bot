@@ -12,9 +12,11 @@ import requests
 
 from stats import record
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-HF_MODEL = os.getenv("HF_MODEL", "Qwen/Qwen2.5-7B-Instruct-1M")
-HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
+# AI is served by the user's own Hugging Face Space running Ollama.
+OLLAMA_URL = os.getenv("OLLAMA_URL", "https://vivekkumarr-my-ai.hf.space").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
+OLLAMA_API_URL = f"{OLLAMA_URL}/api/chat"
+OLLAMA_TOKEN = os.getenv("OLLAMA_TOKEN") or os.getenv("HF_TOKEN")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -27,64 +29,51 @@ def _clean_json_text(text: str) -> str:
 
 
 def ai_chat(system_prompt: str, user_prompt: str, max_tokens: int = 250) -> str | None:
-    if not HF_TOKEN:
-        logging.error("HF_TOKEN is not configured.")
-        return None
-
     payload = {
-        "model": HF_MODEL,
+        "model": OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": max_tokens,
-        "temperature": 0.9,
         "stream": False,
+        "options": {
+            "temperature": 0.9,
+            "num_predict": max_tokens,
+        },
     }
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if OLLAMA_TOKEN:
+        headers["Authorization"] = f"Bearer {OLLAMA_TOKEN}"
 
     for attempt in range(4):
         try:
             response = requests.post(
-                HF_API_URL,
+                OLLAMA_API_URL,
                 headers=headers,
                 json=payload,
-                timeout=45,
+                timeout=90,
             )
 
-            # 400/401/403/404 are request/auth/configuration errors. Retrying
-            # the same request will not fix them. Log only the provider's
-            # response body; never log the token or Authorization header.
-            if response.status_code >= 400 and response.status_code not in (429, 502, 503, 504):
+            if response.status_code >= 400:
                 logging.error(
-                    "Hugging Face HTTP %s: %s",
+                    "Ollama HTTP %s: %s",
                     response.status_code,
                     response.text[:1500],
                 )
                 response.raise_for_status()
 
-            if response.status_code in (429, 502, 503, 504):
-                wait = min(20, 3 * (2 ** attempt))
-                logging.warning(
-                    "Hugging Face model not ready/rate-limited (HTTP %s); retrying in %ss",
-                    response.status_code,
-                    wait,
-                )
-                time.sleep(wait)
-                continue
-
             data: dict[str, Any] = response.json()
-            return data["choices"][0]["message"]["content"].strip()
+            content = data.get("message", {}).get("content")
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("Ollama returned no message content")
+            return content.strip()
 
-        except (requests.RequestException, KeyError, IndexError, TypeError) as exc:
-            if attempt == 3 or (isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code < 500):
-                logging.error("AI request failed: %s", exc)
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            if attempt == 3:
+                logging.error("Ollama request failed: %s", exc)
                 return None
-            wait = min(20, 3 * (2 ** attempt))
-            logging.warning("AI request failed; retrying in %ss: %s", wait, exc)
+            wait = min(15, 2 ** attempt)
+            logging.warning("Ollama request failed; retrying in %ss: %s", wait, exc)
             time.sleep(wait)
 
     return None
