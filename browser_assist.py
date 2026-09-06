@@ -11,7 +11,6 @@ import os
 import sys
 import time
 from typing import Any
-from urllib.parse import quote, urlsplit
 
 import requests
 from websocket import create_connection
@@ -47,48 +46,53 @@ def _browser_ws_url() -> str:
     return ws_url
 
 
-def _page_ws_url(browser_ws_url: str, target_id: str) -> str:
-    parts = urlsplit(browser_ws_url)
-    if not parts.scheme or not parts.netloc:
-        raise RuntimeError(f"Invalid browser websocket URL: {browser_ws_url}")
-    suffix = parts.query
-    return f"{parts.scheme}://{parts.netloc}/devtools/page/{target_id}" + (f"?{suffix}" if suffix else "")
-
-
 def open_url(url: str) -> dict:
-    """Create a Lightpanda page through the CDP websocket.
+    """Create and attach to a Lightpanda page through browser-level CDP.
 
-    Lightpanda's current CDP server does not implement Chrome's REST
-    /json/new tab-creation endpoint, so using PUT /json/new returns 404.
-    Target.createTarget is the supported CDP path.
+    Lightpanda exposes its automation CDP as a browser WebSocket. Avoid the
+    Chrome-specific /json/new and /devtools/page/{id} HTTP/WebSocket paths;
+    create the target and attach to it through the browser CDP connection.
     """
     last_error: Exception | None = None
     for attempt in range(3):
         ws = None
         try:
             browser_ws_url = _browser_ws_url()
-            ws = create_connection(browser_ws_url, timeout=10)
-            response = cdp_call(
+            ws = create_connection(browser_ws_url, timeout=15)
+
+            created = cdp_call(
                 ws,
                 "Target.createTarget",
                 {"url": url},
                 request_id=1,
             )
-            if response.get("error"):
-                raise RuntimeError(f"CDP Target.createTarget failed: {response['error']}")
-            target_id = response.get("result", {}).get("targetId")
+            if created.get("error"):
+                raise RuntimeError(f"CDP Target.createTarget failed: {created['error']}")
+            target_id = created.get("result", {}).get("targetId")
             if not target_id:
                 raise RuntimeError("CDP Target.createTarget returned no targetId")
 
-            page_ws_url = _page_ws_url(browser_ws_url, target_id)
+            attached = cdp_call(
+                ws,
+                "Target.attachToTarget",
+                {"targetId": target_id, "flatten": True},
+                request_id=2,
+            )
+            if attached.get("error"):
+                raise RuntimeError(f"CDP Target.attachToTarget failed: {attached['error']}")
+            session_id = attached.get("result", {}).get("sessionId")
+            if not session_id:
+                raise RuntimeError("CDP Target.attachToTarget returned no sessionId")
+
             return {
                 "id": target_id,
                 "targetId": target_id,
+                "sessionId": session_id,
                 "type": "page",
                 "url": url,
-                "webSocketDebuggerUrl": page_ws_url,
+                "browserWebSocketDebuggerUrl": browser_ws_url,
             }
-        except (requests.RequestException, OSError, ValueError, RuntimeError) as exc:
+        except (requests.RequestException, OSError, ValueError, RuntimeError, TimeoutError) as exc:
             last_error = exc
             logging.warning("Open tab attempt %d/3 failed: %s", attempt + 1, exc)
             if attempt < 2:
@@ -107,23 +111,40 @@ def open_signup() -> dict:
     return open_url(SIGNUP_URL)
 
 
-def cdp_call(ws, method: str, params: dict | None = None, request_id: int = 1) -> dict:
-    ws.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
+def cdp_call(
+    ws,
+    method: str,
+    params: dict | None = None,
+    request_id: int = 1,
+    session_id: str | None = None,
+) -> dict:
+    message = {"id": request_id, "method": method, "params": params or {}}
+    if session_id:
+        message["sessionId"] = session_id
+    ws.send(json.dumps(message))
     deadline = time.time() + 15
     while time.time() < deadline:
-        message = json.loads(ws.recv())
-        if message.get("id") == request_id:
-            return message
+        incoming = json.loads(ws.recv())
+        if incoming.get("id") == request_id:
+            return incoming
     raise TimeoutError(f"Timed out waiting for CDP response: {method}")
 
 
 def _evaluate(tab: dict, expression: str) -> Any:
-    ws_url = tab.get("webSocketDebuggerUrl")
-    if not ws_url:
-        raise RuntimeError("CDP tab has no websocket debugger URL")
-    ws = create_connection(ws_url, timeout=15)
+    ws_url = tab.get("browserWebSocketDebuggerUrl")
+    session_id = tab.get("sessionId")
+    if not ws_url or not session_id:
+        raise RuntimeError("CDP tab has no browser websocket/session")
+    ws = create_connection(ws_url, timeout=20)
     try:
-        result = cdp_call(ws, "Runtime.evaluate", {"expression": expression, "returnByValue": True})
+        result = cdp_call(
+            ws,
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True},
+            session_id=session_id,
+        )
+        if result.get("error"):
+            raise RuntimeError(f"CDP Runtime.evaluate failed: {result['error']}")
         return result.get("result", {}).get("result", {}).get("value")
     finally:
         ws.close()
