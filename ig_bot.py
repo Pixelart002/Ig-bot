@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import string
+import time
 from datetime import date, timedelta
 from typing import Any
 
@@ -30,14 +31,26 @@ def ai_chat(system_prompt: str, user_prompt: str, max_tokens: int = 250) -> str 
         logging.error("HF_TOKEN is not configured.")
         return None
     payload = {"model": HF_MODEL, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], "max_tokens": max_tokens, "temperature": 0.9, "stream": False}
-    try:
-        response = requests.post(HF_API_URL, headers={"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}, json=payload, timeout=45)
-        response.raise_for_status()
-        data: dict[str, Any] = response.json()
-        return data["choices"][0]["message"]["content"].strip()
-    except (requests.RequestException, KeyError, IndexError, TypeError) as exc:
-        logging.error("AI request failed: %s", exc)
-        return None
+    headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+    for attempt in range(4):
+        try:
+            response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=45)
+            if response.status_code in (429, 502, 503, 504):
+                wait = min(20, 3 * (2 ** attempt))
+                logging.warning("Hugging Face model not ready/rate-limited (HTTP %s); retrying in %ss", response.status_code, wait)
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+            return data["choices"][0]["message"]["content"].strip()
+        except (requests.RequestException, KeyError, IndexError, TypeError) as exc:
+            if attempt == 3:
+                logging.error("AI request failed after retries: %s", exc)
+                return None
+            wait = min(20, 3 * (2 ** attempt))
+            logging.warning("AI request failed; retrying in %ss: %s", wait, exc)
+            time.sleep(wait)
+    return None
 
 
 def generate_password(length: int = 20) -> str:
