@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from run_logger import log_event, new_run_id
+
 
 @dataclass
 class Session:
@@ -15,8 +17,18 @@ class Session:
     tab: dict[str, Any] | None = None
     started_at: float = field(default_factory=time.time)
     status: str = "created"
+    run_id: str = field(default_factory=new_run_id)
+    events: list[dict[str, Any]] = field(default_factory=list)
     bridge_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     expires_at: float = field(default_factory=lambda: time.time() + 1800)
+
+    def event(self, name: str, status: str = "info", **details: Any) -> None:
+        safe = {"event": name, "status": status, **details}
+        self.events.append(safe)
+        # Keep in-memory state bounded while retaining the complete file/stdout log.
+        if len(self.events) > 100:
+            del self.events[:-100]
+        log_event(self.run_id, name, status, **details)
 
 
 _lock = threading.RLock()
@@ -27,6 +39,7 @@ def get(chat_id: int) -> Session | None:
     with _lock:
         session = _sessions.get(chat_id)
         if session and session.expires_at < time.time():
+            session.event("session_expired", "warning")
             _sessions.pop(chat_id, None)
             return None
         return session
@@ -36,6 +49,7 @@ def create(chat_id: int, identity: dict[str, Any]) -> Session:
     with _lock:
         session = Session(chat_id=chat_id, identity=identity)
         _sessions[chat_id] = session
+        session.event("run_started", "success", chat_id=chat_id)
         return session
 
 
