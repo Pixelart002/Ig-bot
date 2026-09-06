@@ -10,7 +10,6 @@ import logging
 import os
 import sys
 import time
-from datetime import date
 from typing import Any
 from urllib.parse import quote
 
@@ -23,16 +22,38 @@ SIGNUP_URL = "https://www.instagram.com/accounts/emailsignup/"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
+def _raise_for_status(response: requests.Response, operation: str) -> None:
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = response.text.strip().replace("\n", " ")[:300]
+        raise requests.HTTPError(
+            f"{operation}: HTTP {response.status_code} {response.reason}; {detail}",
+            response=response,
+        ) from exc
+
+
 def cdp_version() -> dict:
     response = requests.get(f"{CDP_URL}/json/version", timeout=5)
-    response.raise_for_status()
+    _raise_for_status(response, "CDP /json/version")
     return response.json()
 
 
 def open_url(url: str) -> dict:
-    response = requests.get(f"{CDP_URL}/json/new?{quote(url, safe=':/?=&')}", timeout=10)
-    response.raise_for_status()
-    return response.json()
+    endpoint = f"{CDP_URL}/json/new?{quote(url, safe=':/?=&') }"
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            response = requests.get(endpoint, timeout=10)
+            _raise_for_status(response, "CDP /json/new")
+            return response.json()
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+            logging.warning("Open tab attempt %d/3 failed: %s", attempt + 1, exc)
+            if attempt < 2:
+                time.sleep(1)
+    assert last_error is not None
+    raise last_error
 
 
 def open_signup() -> dict:
@@ -120,7 +141,6 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
     """
     values = {"email": email, "password": password, "username": str(username), "fullName": str(full_name), "dob": str(dob or "")}
 
-    # Instagram's signup form can render asynchronously. Retry until the inputs exist.
     last_result = None
     for attempt in range(15):
         result = _evaluate(tab, f"({expression})({json.dumps(values)})")
@@ -192,7 +212,6 @@ def start_signup(credentials: dict[str, str], identity: dict[str, Any] | None = 
     tab = open_signup()
     filled = fill_fields(tab, credentials, identity)
     if filled:
-        # Submit only the ordinary signup action. Any CAPTCHA/OTP remains manual.
         submit_signup(tab)
     return tab, filled
 
