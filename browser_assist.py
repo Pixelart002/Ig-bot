@@ -1,6 +1,6 @@
 """Lightpanda/CDP browser workflow helpers.
 
-Account credentials are supplied per workflow. They are never written to the repo.
+Account credentials are supplied per workflow and are never written to the repo.
 CAPTCHA, OTP, verification, and anti-bot controls remain manual.
 """
 from __future__ import annotations
@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+from datetime import date
 from typing import Any
 from urllib.parse import quote
 
@@ -66,6 +67,7 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
     password = credentials.get("password") or os.getenv("IG_PASSWORD")
     username = credentials.get("username")
     full_name = credentials.get("full_name", "")
+    dob = (identity or {}).get("date_of_birth") or credentials.get("date_of_birth")
 
     if identity:
         username = username or ((identity.get("usernames") or [None])[0])
@@ -77,7 +79,7 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
 
     expression = """
     (values) => {
-      const setValue = (selector, value) => {
+      const setInput = (selector, value) => {
         const el = document.querySelector(selector);
         if (!el || !value) return false;
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
@@ -86,31 +88,64 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
         el.dispatchEvent(new Event('change', {bubbles: true}));
         return true;
       };
-      return {
-        email: setValue('input[name="emailOrPhone"], input[name="email"]', values.email),
-        password: setValue('input[name="password"]', values.password),
-        username: setValue('input[name="username"]', values.username),
-        fullName: values.fullName ? setValue('input[name="fullName"]', values.fullName) : false
+      const setSelect = (selectors, value, alternatives=[]) => {
+        if (!value) return false;
+        const el = selectors.map(s => document.querySelector(s)).find(Boolean);
+        if (!el) return false;
+        const candidates = [String(value), ...alternatives.map(String)];
+        const option = [...el.options].find(o => candidates.includes(o.value) || candidates.includes(o.textContent.trim()));
+        if (!option) return false;
+        el.value = option.value;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        return true;
       };
+      const dob = values.dob ? new Date(values.dob + 'T00:00:00Z') : null;
+      const month = dob ? String(dob.getUTCMonth() + 1) : '';
+      const monthName = dob ? dob.toLocaleString('en-US', {month:'long', timeZone:'UTC'}) : '';
+      const day = dob ? String(dob.getUTCDate()) : '';
+      const year = dob ? String(dob.getUTCFullYear()) : '';
+      const result = {
+        email: setInput('input[name="emailOrPhone"], input[name="email"]', values.email),
+        password: setInput('input[name="password"]', values.password),
+        username: setInput('input[name="username"]', values.username),
+        fullName: values.fullName ? setInput('input[name="fullName"]', values.fullName) : false,
+        month: setSelect(['select[name="month"]','select[aria-label*="Month" i]'], month, [monthName, month.padStart(2,'0')]),
+        day: setSelect(['select[name="day"]','select[aria-label*="Day" i]'], day, [day.padStart(2,'0')]),
+        year: setSelect(['select[name="year"]','select[aria-label*="Year" i]'], year, [])
+      };
+      return result;
     }
     """
-    values = {"email": email, "password": password, "username": str(username), "fullName": str(full_name)}
+    values = {"email": email, "password": password, "username": str(username), "fullName": str(full_name), "dob": str(dob or "")}
     result = _evaluate(tab, f"({expression})({json.dumps(values)})")
     logging.info("Signup fields filled: %s", result)
     return bool(result and result.get("email") and result.get("password") and result.get("username"))
 
 
+def submit_signup(tab: dict) -> bool:
+    """Click the normal Instagram signup action only; CAPTCHA/OTP remains manual."""
+    expression = """
+    () => {
+      const buttons = [...document.querySelectorAll('button')];
+      const button = buttons.find(b => /sign up|create account/i.test((b.innerText || '').trim()));
+      if (!button || button.disabled) return false;
+      button.click();
+      return true;
+    }
+    """
+    return bool(_evaluate(tab, expression))
+
+
 def fill_otp(tab: dict, otp: str) -> bool:
-    """Fill a user-supplied verification code; the bot never obtains or generates the code."""
+    """Fill only a user-supplied verification code; never obtain or generate it."""
     otp = str(otp).strip()
     if not otp or len(otp) > 32 or not otp.isalnum():
         return False
     expression = """
     (code) => {
       const inputs = [...document.querySelectorAll('input')];
-      const el = inputs.find(x =>
-        /code|otp|confirmation|security/i.test((x.name || '') + ' ' + (x.placeholder || '') + ' ' + (x.getAttribute('aria-label') || ''))
-      ) || inputs.find(x => x.inputMode === 'numeric' || x.type === 'number' || x.type === 'tel');
+      const el = inputs.find(x => /code|otp|confirmation|security/i.test((x.name || '') + ' ' + (x.placeholder || '') + ' ' + (x.getAttribute('aria-label') || ''))) || inputs.find(x => x.inputMode === 'numeric' || x.type === 'number' || x.type === 'tel');
       if (!el) return {filled:false, submitted:false};
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
       setter?.call(el, code);
@@ -151,17 +186,12 @@ def start_signup(credentials: dict[str, str], identity: dict[str, Any] | None = 
 def main() -> int:
     try:
         version = cdp_version()
-        credentials = {
-            "email": os.getenv("IG_EMAIL", ""),
-            "password": os.getenv("IG_PASSWORD", ""),
-            "username": os.getenv("IG_USERNAME", ""),
-            "full_name": os.getenv("IG_FULL_NAME", ""),
-        }
+        credentials = {"email": os.getenv("IG_EMAIL", ""), "password": os.getenv("IG_PASSWORD", ""), "username": os.getenv("IG_USERNAME", ""), "full_name": os.getenv("IG_FULL_NAME", "")}
         tab, filled = start_signup(credentials)
         print(f"Connected: {version.get('Browser', 'unknown browser')}")
         print(f"Signup tab: {tab.get('url', SIGNUP_URL)}")
         print(f"Form fields filled: {filled}")
-        print("CAPTCHA/OTP/verification and final submission remain manual.")
+        print("CAPTCHA/OTP/verification remain manual.")
         return 0
     except (requests.RequestException, OSError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
         print(f"Signup assistant failed: {exc}", file=sys.stderr)
