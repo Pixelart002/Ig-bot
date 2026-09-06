@@ -79,14 +79,16 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
 
     expression = """
     (values) => {
-      const setInput = (selector, value) => {
-        const el = document.querySelector(selector);
-        if (!el || !value) return false;
+      const setInput = (selectors, value) => {
+        if (!value) return false;
+        const el = selectors.map(s => document.querySelector(s)).find(Boolean);
+        if (!el) return false;
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         setter?.call(el, value);
         el.dispatchEvent(new Event('input', {bubbles: true}));
         el.dispatchEvent(new Event('change', {bubbles: true}));
-        return true;
+        el.dispatchEvent(new Event('blur', {bubbles: true}));
+        return el.value === value;
       };
       const setSelect = (selectors, value, alternatives=[]) => {
         if (!value) return false;
@@ -105,22 +107,31 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
       const monthName = dob ? dob.toLocaleString('en-US', {month:'long', timeZone:'UTC'}) : '';
       const day = dob ? String(dob.getUTCDate()) : '';
       const year = dob ? String(dob.getUTCFullYear()) : '';
-      const result = {
-        email: setInput('input[name="emailOrPhone"], input[name="email"]', values.email),
-        password: setInput('input[name="password"]', values.password),
-        username: setInput('input[name="username"]', values.username),
-        fullName: values.fullName ? setInput('input[name="fullName"]', values.fullName) : false,
+      return {
+        email: setInput(['input[name="emailOrPhone"]','input[name="email"]','input[type="email"]','input[autocomplete="email"]'], values.email),
+        password: setInput(['input[name="password"]','input[type="password"]','input[autocomplete="new-password"]'], values.password),
+        username: setInput(['input[name="username"]','input[autocomplete="username"]'], values.username),
+        fullName: values.fullName ? setInput(['input[name="fullName"]','input[autocomplete="name"]'], values.fullName) : true,
         month: setSelect(['select[name="month"]','select[aria-label*="Month" i]'], month, [monthName, month.padStart(2,'0')]),
         day: setSelect(['select[name="day"]','select[aria-label*="Day" i]'], day, [day.padStart(2,'0')]),
         year: setSelect(['select[name="year"]','select[aria-label*="Year" i]'], year, [])
       };
-      return result;
     }
     """
     values = {"email": email, "password": password, "username": str(username), "fullName": str(full_name), "dob": str(dob or "")}
-    result = _evaluate(tab, f"({expression})({json.dumps(values)})")
-    logging.info("Signup fields filled: %s", result)
-    return bool(result and result.get("email") and result.get("password") and result.get("username"))
+
+    # Instagram's signup form can render asynchronously. Retry until the inputs exist.
+    last_result = None
+    for attempt in range(15):
+        result = _evaluate(tab, f"({expression})({json.dumps(values)})")
+        last_result = result
+        logging.info("Signup fields attempt %d: %s", attempt + 1, result)
+        if result and result.get("email") and result.get("password") and result.get("username"):
+            return True
+        time.sleep(1)
+
+    logging.error("Signup fields could not be filled after 15 attempts: %s", last_result)
+    return False
 
 
 def submit_signup(tab: dict) -> bool:
@@ -180,6 +191,9 @@ def start_signup(credentials: dict[str, str], identity: dict[str, Any] | None = 
     cdp_version()
     tab = open_signup()
     filled = fill_fields(tab, credentials, identity)
+    if filled:
+        # Submit only the ordinary signup action. Any CAPTCHA/OTP remains manual.
+        submit_signup(tab)
     return tab, filled
 
 
