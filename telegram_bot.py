@@ -1,17 +1,18 @@
 """Telegram control plane for the Lightpanda signup/login assistant.
 
-CAPTCHA, OTP and account verification remain manual. The optional verification
-bridge is protected by a random, expiring per-user token and never exposes CDP.
+CAPTCHA and anti-bot controls remain manual. User-supplied OTP is handed to
+Lightpanda only to fill the active verification field and continue the flow.
 """
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Any
 
 import requests
 
-from browser_assist import inspect_state, start_signup
+from browser_assist import fill_otp, inspect_state, start_signup
 from ig_bot import generate_identity
 from stats import format_stats, record
 from verification_bridge import start_bridge
@@ -51,16 +52,7 @@ def audit(chat_id: int, action: str, status: str, identity: dict[str, Any] | Non
     username = str((identity or {}).get("usernames", ["—"])[0])
     name = str((identity or {}).get("display_names", ["—"])[0])
     dob = str((identity or {}).get("date_of_birth") or "—")
-    text = (
-        "👁 *Super Admin Activity*\n\n"
-        f"👤 User ID: `{chat_id}`\n"
-        f"⚙️ Action: *{action}*\n"
-        f"📌 Status: *{status}*\n"
-        f"👨 Name: `{name}`\n"
-        f"🔹 Username: `{username}`\n"
-        f"🎂 DOB: `{dob}`\n"
-        "🔐 Password: `••••••••`"
-    )
+    text = ("👁 *Super Admin Activity*\n\n" f"👤 User ID: `{chat_id}`\n" f"⚙️ Action: *{action}*\n" f"📌 Status: *{status}*\n" f"👨 Name: `{name}`\n" f"🔹 Username: `{username}`\n" f"🎂 DOB: `{dob}`\n" "🔐 Password: `••••••••`")
     for admin_id in ids:
         try:
             tg("sendMessage", {"chat_id": int(admin_id), "text": text, "parse_mode": "Markdown"})
@@ -69,11 +61,7 @@ def audit(chat_id: int, action: str, status: str, identity: dict[str, Any] | Non
 
 
 def keyboard() -> dict[str, Any]:
-    return {"inline_keyboard": [[
-        {"text": "🆕 Create Account", "callback_data": "create"},
-        {"text": "🔐 Login", "callback_data": "login"}],
-        [{"text": "🤖 Generate Identity", "callback_data": "identity"},
-         {"text": "📊 Stats", "callback_data": "stats"}]]}
+    return {"inline_keyboard": [[{"text": "🆕 Create Account", "callback_data": "create"}, {"text": "🔐 Login", "callback_data": "login"}], [{"text": "🤖 Generate Identity", "callback_data": "identity"}, {"text": "📊 Stats", "callback_data": "stats"}]]}
 
 
 def answer_callback(callback_id: str, text: str) -> None:
@@ -84,12 +72,7 @@ def identity_text(identity: dict[str, Any], include_password: bool = True) -> st
     names = identity.get("display_names", [])
     usernames = identity.get("usernames", [])
     bios = identity.get("bios", [])
-    lines = [
-        "*Name:* " + str(names[0] if names else "—"),
-        "*Username:* " + str(usernames[0] if usernames else "—"),
-        "*DOB:* " + str(identity.get("date_of_birth", "—")),
-        "*Bio:* " + str(bios[0] if bios else "—"),
-    ]
+    lines = ["*Name:* " + str(names[0] if names else "—"), "*Username:* " + str(usernames[0] if usernames else "—"), "*DOB:* " + str(identity.get("date_of_birth", "—")), "*Bio:* " + str(bios[0] if bios else "—")]
     if include_password:
         lines.insert(2, "*Password:* `" + str(identity.get("password", "—")) + "`")
     return "\n".join(lines)
@@ -101,13 +84,16 @@ def verification_link(session) -> str:
     return f"{PUBLIC_BASE_URL}/v/{session.bridge_token}"
 
 
-def send_verification(chat_id: int, session) -> None:
+def send_otp_prompt(chat_id: int, session, status: str = "otp_required") -> None:
+    session.status = status
+    record("otp_requested")
+    audit(chat_id, "Create Account", "otp_required", session.identity)
     link = verification_link(session)
-    text = "⚠️ *Manual verification required.*\n\nComplete CAPTCHA/OTP/verification yourself. Then send `/completed` here."
+    text = "🔢 *OTP required.*\n\nInstagram has requested a verification code. Send the OTP here as a message; I will enter the code into the active Lightpanda session and continue."
     markup = {"inline_keyboard": []}
     if link:
         markup["inline_keyboard"].append([{"text": "🔗 Open Verification Session", "url": link}])
-    markup["inline_keyboard"].append([{"text": "📊 Stats", "callback_data": "stats"}])
+    markup["inline_keyboard"].append([{"text": "🛑 Cancel", "callback_data": "cancel_session"}])
     tg("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "Markdown", "reply_markup": markup})
 
 
@@ -121,7 +107,6 @@ def handle_create(chat_id: int) -> None:
         tg("sendMessage", {"chat_id": chat_id, "text": "❌ Could not generate signup details."})
         return
     create(chat_id, identity)
-    record("identity_generated")
     audit(chat_id, "Create Account", "identity_generated", identity)
     tg("sendMessage", {"chat_id": chat_id, "text": "🆕 *Account Details*\n\n" + identity_text(identity) + "\n\nPress *Confirm & Create* to continue.", "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "✅ Confirm & Create", "callback_data": "confirm_create"}], [{"text": "🔄 Regenerate", "callback_data": "create"}]]}})
 
@@ -133,11 +118,14 @@ def handle_callback(callback: dict[str, Any]) -> None:
     if not allowed(chat_id):
         tg("sendMessage", {"chat_id": chat_id, "text": "⛔ This bot is not enabled for your Telegram account."})
         return
-
     if data == "stats":
         tg("sendMessage", {"chat_id": chat_id, "text": format_stats(), "parse_mode": "Markdown", "reply_markup": keyboard()})
         return
-
+    if data == "cancel_session":
+        clear(chat_id)
+        audit(chat_id, "Session", "cancelled")
+        tg("sendMessage", {"chat_id": chat_id, "text": "🛑 Session cancelled.", "reply_markup": keyboard()})
+        return
     if data == "identity":
         identity = generate_identity()
         if not identity:
@@ -145,15 +133,12 @@ def handle_callback(callback: dict[str, Any]) -> None:
             audit(chat_id, "Generate Identity", "failed")
             return
         create(chat_id, identity)
-        record("identity_generated")
         audit(chat_id, "Generate Identity", "ready", identity)
         tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Identity Preview*\n\n" + identity_text(identity), "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "🔄 Generate Again", "callback_data": "identity"}, {"text": "🆕 Use for Signup", "callback_data": "confirm_create"}]]}})
         return
-
     if data == "create":
         handle_create(chat_id)
         return
-
     if data == "confirm_create":
         session = get(chat_id)
         if not session:
@@ -163,12 +148,7 @@ def handle_callback(callback: dict[str, Any]) -> None:
         record("confirmed")
         audit(chat_id, "Create Account", "confirmed", session.identity)
         try:
-            credentials = {
-                "email": os.getenv("IG_EMAIL", ""),
-                "password": str(session.identity.get("password", "")),
-                "username": str((session.identity.get("usernames") or [""])[0]),
-                "full_name": str((session.identity.get("display_names") or [""])[0]),
-            }
+            credentials = {"email": os.getenv("IG_EMAIL", ""), "password": str(session.identity.get("password", "")), "username": str((session.identity.get("usernames") or [""])[0]), "full_name": str((session.identity.get("display_names") or [""])[0])}
             tab, filled = start_signup(credentials, session.identity)
             session.tab = tab
             session.status = "form_filled" if filled else "waiting"
@@ -177,21 +157,22 @@ def handle_callback(callback: dict[str, Any]) -> None:
                 audit(chat_id, "Create Account", "form_filled", session.identity)
             session.started_at = time.time()
             state = inspect_state(tab)
-            if state["status"] == "verification_required":
-                session.status = "verification_required"
+            if state["status"] == "otp_required":
+                send_otp_prompt(chat_id, session)
+            elif state["status"] == "captcha_required":
+                session.status = "captcha_required"
                 record("verification_required")
-                audit(chat_id, "Create Account", "verification_required", session.identity)
-                send_verification(chat_id, session)
+                audit(chat_id, "Create Account", "captcha_required", session.identity)
+                tg("sendMessage", {"chat_id": chat_id, "text": "⚠️ CAPTCHA is required. Complete it manually in the verification session, then send `/completed`." + (("\n\n" + verification_link(session)) if verification_link(session) else ""), "parse_mode": "Markdown"})
             else:
                 audit(chat_id, "Create Account", "waiting_for_manual_step", session.identity)
-                tg("sendMessage", {"chat_id": chat_id, "text": "🌐 Signup session is ready. Continue in the verification session if prompted, then send `/completed`." + ("\n\n" + verification_link(session) if verification_link(session) else ""), "parse_mode": "Markdown"})
+                tg("sendMessage", {"chat_id": chat_id, "text": "🌐 Signup session is ready. Continue in the verification session if prompted, then send `/completed`." + (("\n\n" + verification_link(session)) if verification_link(session) else ""), "parse_mode": "Markdown"})
         except Exception as exc:
             session.status = "failed"
             record("signup_failed", time.time() - session.started_at)
             audit(chat_id, "Create Account", "failed", session.identity)
             tg("sendMessage", {"chat_id": chat_id, "text": f"❌ Signup session failed: {type(exc).__name__}"})
         return
-
     if data == "login":
         record("login_started")
         audit(chat_id, "Login", "started")
@@ -222,7 +203,8 @@ def handle_message(message: dict[str, Any]) -> None:
         return
     if text in ("/start", "/menu"):
         tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Instagram Assistant*\nChoose an action:", "parse_mode": "Markdown", "reply_markup": keyboard()})
-    elif text == "/completed":
+        return
+    if text == "/completed":
         session = get(chat_id)
         if not session or not session.tab:
             tg("sendMessage", {"chat_id": chat_id, "text": "ℹ️ No active browser session."})
@@ -230,10 +212,10 @@ def handle_message(message: dict[str, Any]) -> None:
         try:
             state = inspect_state(session.tab)
             session.status = state["status"]
-            if state["status"] == "verification_required":
-                record("verification_required")
-                audit(chat_id, "Verification", "still_required", session.identity)
-                tg("sendMessage", {"chat_id": chat_id, "text": "⏳ Verification is still required. Finish CAPTCHA/OTP/verification, then send `/completed` again."})
+            if state["status"] == "otp_required":
+                send_otp_prompt(chat_id, session)
+            elif state["status"] == "captcha_required":
+                tg("sendMessage", {"chat_id": chat_id, "text": "⚠️ CAPTCHA is still required. Complete it manually, then send `/completed`."})
             elif session.identity and state["status"] == "completed":
                 record("signup_completed", time.time() - session.started_at)
                 audit(chat_id, "Create Account", "completed", session.identity)
@@ -255,11 +237,44 @@ def handle_message(message: dict[str, Any]) -> None:
                 record("login_failed")
                 audit(chat_id, "Login", "session_check_failed")
             tg("sendMessage", {"chat_id": chat_id, "text": f"❌ Could not verify session: {type(exc).__name__}"})
-    elif text == "/cancel":
+        return
+    if text == "/cancel":
         session = get(chat_id)
         audit(chat_id, "Session", "cancelled", session.identity if session else None)
         clear(chat_id)
         tg("sendMessage", {"chat_id": chat_id, "text": "🛑 Session cancelled.", "reply_markup": keyboard()})
+        return
+
+    session = get(chat_id)
+    if session and session.tab and session.status == "otp_required" and re.fullmatch(r"[A-Za-z0-9]{4,32}", text):
+        try:
+            if fill_otp(session.tab, text):
+                session.status = "otp_submitted"
+                record("otp_submitted")
+                audit(chat_id, "Create Account", "otp_submitted", session.identity)
+                tg("sendMessage", {"chat_id": chat_id, "text": "✅ OTP entered into the active Lightpanda session. Checking the next step…"})
+                time.sleep(2)
+                state = inspect_state(session.tab)
+                session.status = state["status"]
+                if state["status"] == "completed":
+                    record("signup_completed", time.time() - session.started_at)
+                    audit(chat_id, "Create Account", "completed", session.identity)
+                    tg("sendMessage", {"chat_id": chat_id, "text": "🎉 *Registration completed successfully.*\n\n📊 Stats updated.", "parse_mode": "Markdown", "reply_markup": keyboard()})
+                    clear(chat_id)
+                elif state["status"] == "captcha_required":
+                    audit(chat_id, "Create Account", "captcha_required", session.identity)
+                    tg("sendMessage", {"chat_id": chat_id, "text": "⚠️ OTP accepted, but CAPTCHA/another manual verification step is required. Complete it manually, then send `/completed`."})
+                elif state["status"] == "otp_required":
+                    tg("sendMessage", {"chat_id": chat_id, "text": "⚠️ The page still requests a verification code. Send the current OTP again."})
+                else:
+                    tg("sendMessage", {"chat_id": chat_id, "text": "⏳ OTP submitted. Continue any remaining manual step, then send `/completed`."})
+            else:
+                audit(chat_id, "Create Account", "otp_field_not_found", session.identity)
+                tg("sendMessage", {"chat_id": chat_id, "text": "❌ I couldn't find the OTP field. Open the verification session and send `/completed` once the OTP screen is visible."})
+        except Exception as exc:
+            audit(chat_id, "Create Account", "otp_submit_failed", session.identity)
+            tg("sendMessage", {"chat_id": chat_id, "text": f"❌ OTP handoff failed: {type(exc).__name__}"})
+        return
 
 
 def main() -> None:
