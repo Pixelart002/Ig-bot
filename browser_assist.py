@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 import requests
-from websocket import create_connection
+from websocket import WebSocketBadStatusException, create_connection
 
 CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222")
 SIGNUP_URL = "https://www.instagram.com/accounts/emailsignup/"
@@ -39,26 +39,36 @@ def cdp_version() -> dict:
 
 
 def _browser_ws_url() -> str:
-    version = cdp_version()
-    ws_url = version.get("webSocketDebuggerUrl")
-    if not ws_url:
-        raise RuntimeError("CDP /json/version did not provide webSocketDebuggerUrl")
-    return ws_url
+    """Return the documented Lightpanda local browser CDP endpoint."""
+    cdp_url = CDP_URL.rstrip("/")
+    if cdp_url.startswith("https://"):
+        return cdp_url.replace("https://", "wss://", 1)
+    if cdp_url.startswith("http://"):
+        return cdp_url.replace("http://", "ws://", 1)
+    raise RuntimeError(f"Unsupported CDP_URL: {CDP_URL}")
+
+
+def _create_browser_connection():
+    """Open a direct Lightpanda websocket without proxy or Origin interference."""
+    return create_connection(
+        _browser_ws_url(),
+        timeout=20,
+        http_proxy_host=None,
+        http_proxy_port=None,
+        http_no_proxy=["127.0.0.1", "localhost"],
+        suppress_origin=True,
+    )
 
 
 def open_url(url: str) -> dict:
-    """Create and attach to a Lightpanda page through browser-level CDP.
-
-    Lightpanda exposes its automation CDP as a browser WebSocket. Avoid the
-    Chrome-specific /json/new and /devtools/page/{id} HTTP/WebSocket paths;
-    create the target and attach to it through the browser CDP connection.
-    """
+    """Create and attach to a Lightpanda page through browser-level CDP."""
     last_error: Exception | None = None
     for attempt in range(3):
         ws = None
         try:
+            cdp_version()
             browser_ws_url = _browser_ws_url()
-            ws = create_connection(browser_ws_url, timeout=15)
+            ws = _create_browser_connection()
 
             created = cdp_call(
                 ws,
@@ -84,6 +94,9 @@ def open_url(url: str) -> dict:
             if not session_id:
                 raise RuntimeError("CDP Target.attachToTarget returned no sessionId")
 
+            # Keep the browser-level websocket alive for the lifetime of the tab.
+            # Reconnecting later can invalidate the attached session on some
+            # Lightpanda builds.
             return {
                 "id": target_id,
                 "targetId": target_id,
@@ -91,14 +104,27 @@ def open_url(url: str) -> dict:
                 "type": "page",
                 "url": url,
                 "browserWebSocketDebuggerUrl": browser_ws_url,
+                "_ws": ws,
             }
+        except WebSocketBadStatusException as exc:
+            status = getattr(exc, "status_code", None)
+            headers = getattr(exc, "resp_headers", None)
+            detail = f" status={status}" if status is not None else ""
+            if headers:
+                detail += f" headers={dict(headers)}"
+            last_error = RuntimeError(f"Lightpanda CDP websocket handshake failed.{detail} {exc}")
+            logging.warning("Open tab attempt %d/3 failed: %s", attempt + 1, last_error)
+            if attempt < 2:
+                time.sleep(1)
         except (requests.RequestException, OSError, ValueError, RuntimeError, TimeoutError) as exc:
             last_error = exc
             logging.warning("Open tab attempt %d/3 failed: %s", attempt + 1, exc)
             if attempt < 2:
                 time.sleep(1)
         finally:
-            if ws is not None:
+            # Do not close a successfully-attached websocket. The returned tab
+            # owns it. Close only connections that failed before returning.
+            if ws is not None and last_error is not None:
                 try:
                     ws.close()
                 except Exception:
@@ -131,23 +157,29 @@ def cdp_call(
 
 
 def _evaluate(tab: dict, expression: str) -> Any:
-    ws_url = tab.get("browserWebSocketDebuggerUrl")
+    ws = tab.get("_ws")
     session_id = tab.get("sessionId")
-    if not ws_url or not session_id:
-        raise RuntimeError("CDP tab has no browser websocket/session")
-    ws = create_connection(ws_url, timeout=20)
-    try:
-        result = cdp_call(
-            ws,
-            "Runtime.evaluate",
-            {"expression": expression, "returnByValue": True},
-            session_id=session_id,
-        )
-        if result.get("error"):
-            raise RuntimeError(f"CDP Runtime.evaluate failed: {result['error']}")
-        return result.get("result", {}).get("result", {}).get("value")
-    finally:
-        ws.close()
+    if ws is None or not session_id:
+        raise RuntimeError("CDP tab has no live browser websocket/session")
+    result = cdp_call(
+        ws,
+        "Runtime.evaluate",
+        {"expression": expression, "returnByValue": True},
+        session_id=session_id,
+    )
+    if result.get("error"):
+        raise RuntimeError(f"CDP Runtime.evaluate failed: {result['error']}")
+    return result.get("result", {}).get("result", {}).get("value")
+
+
+def close_tab(tab: dict) -> None:
+    ws = tab.get("_ws")
+    if ws is not None:
+        try:
+            ws.close()
+        except Exception:
+            pass
+        tab["_ws"] = None
 
 
 def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: dict[str, Any] | None = None) -> bool:
@@ -278,10 +310,14 @@ def inspect_state(tab: dict) -> dict:
 def start_signup(credentials: dict[str, str], identity: dict[str, Any] | None = None) -> tuple[dict, bool]:
     cdp_version()
     tab = open_signup()
-    filled = fill_fields(tab, credentials, identity)
-    if filled:
-        submit_signup(tab)
-    return tab, filled
+    try:
+        filled = fill_fields(tab, credentials, identity)
+        if filled:
+            submit_signup(tab)
+        return tab, filled
+    except Exception:
+        close_tab(tab)
+        raise
 
 
 def main() -> int:
@@ -289,12 +325,15 @@ def main() -> int:
         version = cdp_version()
         credentials = {"email": os.getenv("IG_EMAIL", ""), "password": os.getenv("IG_PASSWORD", ""), "username": os.getenv("IG_USERNAME", ""), "full_name": os.getenv("IG_FULL_NAME", "")}
         tab, filled = start_signup(credentials)
-        print(f"Connected: {version.get('Browser', 'unknown browser')}")
-        print(f"Signup tab: {tab.get('url', SIGNUP_URL)}")
-        print(f"Form fields filled: {filled}")
-        print("CAPTCHA/OTP/verification remain manual.")
-        return 0
-    except (requests.RequestException, OSError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+        try:
+            print(f"Connected: {version.get('Browser', 'unknown browser')}")
+            print(f"Signup tab: {tab.get('url', SIGNUP_URL)}")
+            print(f"Form fields filled: {filled}")
+            print("CAPTCHA/OTP/verification remain manual.")
+            return 0
+        finally:
+            close_tab(tab)
+    except (requests.RequestException, OSError, TimeoutError, json.JSONDecodeError, RuntimeError, WebSocketBadStatusException) as exc:
         print(f"Signup assistant failed: {exc}", file=sys.stderr)
         return 1
 
