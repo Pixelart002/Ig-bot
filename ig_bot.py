@@ -25,6 +25,12 @@ def _clean_json_text(text: str) -> str:
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
     text = re.sub(r"\s*```$", "", text)
+    # Small instruct/coder models sometimes add a short sentence before/after
+    # the JSON despite the prompt. Extract the outermost JSON object safely.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        text = text[start:end + 1]
     return text.strip()
 
 
