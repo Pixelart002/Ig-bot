@@ -48,6 +48,18 @@ def cdp_call(ws, method: str, params: dict | None = None, request_id: int = 1) -
     raise TimeoutError(f"Timed out waiting for CDP response: {method}")
 
 
+def _evaluate(tab: dict, expression: str) -> Any:
+    ws_url = tab.get("webSocketDebuggerUrl")
+    if not ws_url:
+        raise RuntimeError("CDP tab has no websocket debugger URL")
+    ws = create_connection(ws_url, timeout=15)
+    try:
+        result = cdp_call(ws, "Runtime.evaluate", {"expression": expression, "returnByValue": True})
+        return result.get("result", {}).get("result", {}).get("value")
+    finally:
+        ws.close()
+
+
 def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: dict[str, Any] | None = None) -> bool:
     credentials = credentials or {}
     email = credentials.get("email") or os.getenv("IG_EMAIL")
@@ -63,61 +75,70 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
         logging.error("Per-account email, password and username are required.")
         return False
 
-    ws_url = tab.get("webSocketDebuggerUrl")
-    if not ws_url:
-        logging.error("CDP tab did not provide a websocket debugger URL.")
-        return False
+    expression = """
+    (values) => {
+      const setValue = (selector, value) => {
+        const el = document.querySelector(selector);
+        if (!el || !value) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        setter?.call(el, value);
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        return true;
+      };
+      return {
+        email: setValue('input[name="emailOrPhone"], input[name="email"]', values.email),
+        password: setValue('input[name="password"]', values.password),
+        username: setValue('input[name="username"]', values.username),
+        fullName: values.fullName ? setValue('input[name="fullName"]', values.fullName) : false
+      };
+    }
+    """
+    values = {"email": email, "password": password, "username": str(username), "fullName": str(full_name)}
+    result = _evaluate(tab, f"({expression})({json.dumps(values)})")
+    logging.info("Signup fields filled: %s", result)
+    return bool(result and result.get("email") and result.get("password") and result.get("username"))
 
-    ws = create_connection(ws_url, timeout=15)
-    try:
-        time.sleep(3)
-        expression = """
-        (values) => {
-          const setValue = (selector, value) => {
-            const el = document.querySelector(selector);
-            if (!el || !value) return false;
-            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-            setter?.call(el, value);
-            el.dispatchEvent(new Event('input', {bubbles: true}));
-            el.dispatchEvent(new Event('change', {bubbles: true}));
-            return true;
-          };
-          return {
-            email: setValue('input[name="emailOrPhone"], input[name="email"]', values.email),
-            password: setValue('input[name="password"]', values.password),
-            username: setValue('input[name="username"]', values.username),
-            fullName: values.fullName ? setValue('input[name="fullName"]', values.fullName) : false
-          };
-        }
-        """
-        values = {"email": email, "password": password, "username": str(username), "fullName": str(full_name)}
-        result = cdp_call(ws, "Runtime.evaluate", {"expression": f"({expression})({json.dumps(values)})", "returnByValue": True})
-        filled = result.get("result", {}).get("result", {}).get("value", {})
-        logging.info("Signup fields filled: %s", filled)
-        return bool(filled.get("email") and filled.get("password") and filled.get("username"))
-    finally:
-        ws.close()
+
+def fill_otp(tab: dict, otp: str) -> bool:
+    """Fill a user-supplied verification code; the bot never obtains or generates the code."""
+    otp = str(otp).strip()
+    if not otp or len(otp) > 32 or not otp.isalnum():
+        return False
+    expression = """
+    (code) => {
+      const inputs = [...document.querySelectorAll('input')];
+      const el = inputs.find(x =>
+        /code|otp|confirmation|security/i.test((x.name || '') + ' ' + (x.placeholder || '') + ' ' + (x.getAttribute('aria-label') || ''))
+      ) || inputs.find(x => x.inputMode === 'numeric' || x.type === 'number' || x.type === 'tel');
+      if (!el) return {filled:false, submitted:false};
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(el, code);
+      el.dispatchEvent(new Event('input', {bubbles:true}));
+      el.dispatchEvent(new Event('change', {bubbles:true}));
+      const button = [...document.querySelectorAll('button')].find(b => /confirm|continue|next|submit|verify/i.test(b.innerText || b.getAttribute('aria-label') || ''));
+      if (button && !button.disabled) { button.click(); return {filled:true, submitted:true}; }
+      return {filled:true, submitted:false};
+    }
+    """
+    result = _evaluate(tab, f"({expression})({json.dumps(otp)})")
+    logging.info("OTP field result: %s", result)
+    return bool(result and result.get("filled"))
 
 
 def inspect_state(tab: dict) -> dict:
-    ws_url = tab.get("webSocketDebuggerUrl")
-    if not ws_url:
-        raise RuntimeError("CDP tab has no websocket debugger URL")
-    ws = create_connection(ws_url, timeout=15)
-    try:
-        result = cdp_call(ws, "Runtime.evaluate", {"expression": "JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,4000)})", "returnByValue": True})
-        value = result.get("result", {}).get("result", {}).get("value", "{}")
-        data = json.loads(value)
-        text = data.get("text", "").lower()
-        if any(x in text for x in ("security code", "confirmation code", "enter the code", "captcha", "confirm your email")):
-            status = "verification_required"
-        elif "welcome to instagram" in text:
-            status = "completed"
-        else:
-            status = "waiting"
-        return {"status": status, "url": data.get("url", ""), "title": data.get("title", "")}
-    finally:
-        ws.close()
+    value = _evaluate(tab, "JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,4000)})")
+    data = json.loads(value or "{}")
+    text = data.get("text", "").lower()
+    if any(x in text for x in ("security code", "confirmation code", "enter the code", "confirm your email")):
+        status = "otp_required"
+    elif "captcha" in text:
+        status = "captcha_required"
+    elif "welcome to instagram" in text:
+        status = "completed"
+    else:
+        status = "waiting"
+    return {"status": status, "url": data.get("url", ""), "title": data.get("title", "")}
 
 
 def start_signup(credentials: dict[str, str], identity: dict[str, Any] | None = None) -> tuple[dict, bool]:
