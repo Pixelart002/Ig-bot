@@ -135,16 +135,25 @@ def handle_create(chat_id: int) -> None:
 
 
 def generate_after_email(chat_id: int, email: str) -> None:
+    # Persist the email before any AI call. If AI fails, the email remains available.
+    session = get(chat_id)
+    if not session:
+        session = create(chat_id, {})
+    session.identity["email"] = email
+    session.status = "identity_generating"
+    audit(chat_id, "Create Account", "email_saved")
     audit(chat_id, "Create Account", "identity_generation_started")
+    tg("sendMessage", {"chat_id": chat_id, "text": "📧 Email saved.\n\n⏳ Generating account details…", "parse_mode": "Markdown"})
     identity = generate_identity()
     if not identity:
+        session.status = "identity_generation_failed"
         record("signup_failed")
-        audit(chat_id, "Create Account", "identity_generation_failed")
-        clear(chat_id)
-        tg("sendMessage", {"chat_id": chat_id, "text": "❌ Could not generate signup details. Please try again.", "reply_markup": keyboard()})
+        audit(chat_id, "Create Account", "identity_generation_failed", session.identity)
+        tg("sendMessage", {"chat_id": chat_id, "text": "❌ Identity generation failed. Your email is saved. Tap 🤖 Generate Identity to retry.", "reply_markup": keyboard()})
         return
     identity["email"] = email
-    create(chat_id, identity)
+    session.identity = identity
+    session.status = "identity_ready"
     audit(chat_id, "Create Account", "identity_generated", identity)
     tg("sendMessage", {"chat_id": chat_id, "text": "🆕 *Account Details*\n\n" + identity_text(identity) + f"\n*Email:* `{email}`\n\nReview the details, then continue.", "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
 
@@ -158,11 +167,14 @@ def regenerate_identity(chat_id: int) -> None:
     tg("sendMessage", {"chat_id": chat_id, "text": "🔄 Generating a fresh identity…"})
     identity = generate_identity()
     if not identity:
-        tg("sendMessage", {"chat_id": chat_id, "text": "❌ Identity generation failed. Please try again.", "reply_markup": cancel_keyboard()})
-        audit(chat_id, "Create Account", "identity_regeneration_failed")
+        if session:
+            session.status = "identity_generation_failed"
+        tg("sendMessage", {"chat_id": chat_id, "text": "❌ Identity generation failed. Your email is saved. Please retry.", "reply_markup": cancel_keyboard()})
+        audit(chat_id, "Create Account", "identity_regeneration_failed", session.identity if session else None)
         return
     identity["email"] = email
-    create(chat_id, identity)
+    session.identity = identity
+    session.status = "identity_ready"
     audit(chat_id, "Create Account", "identity_regenerated", identity)
     tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Fresh Account Details*\n\n" + identity_text(identity) + f"\n*Email:* `{email}`\n\nReview and continue.", "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
 
@@ -218,14 +230,25 @@ def handle_callback(callback: dict[str, Any]) -> None:
         tg("sendMessage", {"chat_id": chat_id, "text": "🛑 *Session cancelled.*\n\nYou are back at the main menu.", "parse_mode": "Markdown", "reply_markup": keyboard()})
         return
     if data == "identity":
+        session = get(chat_id)
+        saved_email = str(session.identity.get("email", "")) if session else ""
         identity = generate_identity()
         if not identity:
-            tg("sendMessage", {"chat_id": chat_id, "text": "❌ Identity generation failed. Check the AI service configuration.", "reply_markup": keyboard()})
-            audit(chat_id, "Generate Identity", "failed")
+            if session and saved_email:
+                session.status = "identity_generation_failed"
+            tg("sendMessage", {"chat_id": chat_id, "text": "❌ Identity generation failed. Your email is still saved. Tap 🤖 Generate Identity to retry.", "reply_markup": keyboard()})
+            audit(chat_id, "Generate Identity", "failed", session.identity if session else None)
             return
-        create(chat_id, identity)
+        if saved_email:
+            identity["email"] = saved_email
+        if session:
+            session.identity = identity
+            session.status = "identity_ready"
+        else:
+            session = create(chat_id, identity)
+            session.status = "identity_ready"
         audit(chat_id, "Generate Identity", "ready", identity)
-        tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Identity Preview*\n\n" + identity_text(identity), "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
+        tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Identity Preview*\n\n" + identity_text(identity) + (f"\n*Email:* `{saved_email}`" if saved_email else ""), "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
         return
     if data == "regenerate_identity":
         regenerate_identity(chat_id)
@@ -299,7 +322,7 @@ def handle_message(message: dict[str, Any]) -> None:
         session = get(chat_id)
         audit(chat_id, "Session", "cancelled", session.identity if session else None)
         clear(chat_id)
-        tg("sendMessage", {"chat_id": chat_id, "text": "🛑 *Session cancelled.*", "parse_mode": "Markdown", "reply_markup": keyboard()})
+        tg("sendMessage", {"chat_id": chat_id, "text": "🛑 *Session cancelled.*", "reply_markup": keyboard()})
         return
 
     session = get(chat_id)
@@ -309,7 +332,6 @@ def handle_message(message: dict[str, Any]) -> None:
             return
         email = text.lower()
         audit(chat_id, "Create Account", "email_received")
-        tg("sendMessage", {"chat_id": chat_id, "text": f"📧 Email received: `{email}`\n\n⏳ Generating account details…", "parse_mode": "Markdown"})
         generate_after_email(chat_id, email)
         return
 
