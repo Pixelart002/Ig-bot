@@ -90,7 +90,7 @@ def open_url(url: str) -> dict:
             if not session_id:
                 raise RuntimeError("CDP Target.attachToTarget returned no sessionId")
 
-            return {
+            tab = {
                 "id": target_id,
                 "targetId": target_id,
                 "sessionId": session_id,
@@ -99,6 +99,8 @@ def open_url(url: str) -> dict:
                 "browserWebSocketDebuggerUrl": browser_ws_url,
                 "_ws": ws,
             }
+            _prepare_page(tab)
+            return tab
         except WebSocketBadStatusException as exc:
             status = getattr(exc, "status_code", None)
             headers = getattr(exc, "resp_headers", None)
@@ -163,6 +165,32 @@ def _evaluate(tab: dict, expression: str) -> Any:
     return result.get("result", {}).get("result", {}).get("value")
 
 
+def _prepare_page(tab: dict) -> None:
+    """Enable the page/runtime domains and allow initial DOM/resources to settle."""
+    ws = tab.get("_ws")
+    session_id = tab.get("sessionId")
+    if ws is None or not session_id:
+        raise RuntimeError("Cannot prepare page without a live CDP session")
+    for method in ("Page.enable", "Runtime.enable"):
+        result = cdp_call(ws, method, {}, session_id=session_id)
+        if result.get("error"):
+            raise RuntimeError(f"CDP {method} failed: {result['error']}")
+    time.sleep(3)
+
+
+def _wait_for_username_field(tab: dict, attempts: int = 20, delay: float = 0.5) -> bool:
+    """Do not proceed until the real signup username input exists in the page DOM."""
+    for _ in range(attempts):
+        found = _evaluate(
+            tab,
+            "Boolean(document.querySelector('input[name=\"username\"]') || document.querySelector('input[autocomplete=\"username\"]'))",
+        )
+        if found:
+            return True
+        time.sleep(delay)
+    return False
+
+
 def close_tab(tab: dict) -> None:
     ws = tab.get("_ws")
     if ws is not None:
@@ -174,45 +202,54 @@ def close_tab(tab: dict) -> None:
 
 
 def _username_available(tab: dict, username: str) -> bool:
-    """Check availability through the normal signup username field/UI only.
+    """Confirm availability only through the normal visible signup UI.
 
-    This intentionally does not call Instagram's private/internal APIs. If the
-    normal page reports an error, the candidate is rejected; if the page gives
-    no clear availability signal after a short wait, we do not submit it.
+    No private/internal Instagram endpoint is queried. Absence of an error is
+    never treated as proof of availability; the flow advances only when the
+    UI explicitly reports availability.
     """
     expression = """
     (candidate) => {
       const el = document.querySelector('input[name="username"]') || document.querySelector('input[autocomplete="username"]');
       if (!el) return {state:'missing'};
+      el.focus();
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
       setter?.call(el, candidate);
       el.dispatchEvent(new Event('input', {bubbles:true}));
       el.dispatchEvent(new Event('change', {bubbles:true}));
       el.dispatchEvent(new Event('blur', {bubbles:true}));
-      return {state:'entered'};
+      return {state:'entered', value:el.value || ''};
     }
     """
     result = _evaluate(tab, f"({expression})({json.dumps(username)})")
-    if not result or result.get("state") != "entered":
+    if not result or result.get("state") != "entered" or result.get("value") != username:
         return False
 
     unavailable_re = re.compile(
         r"username\s+(?:is\s+)?(?:not\s+available|unavailable)|"
         r"username\s+(?:is\s+)?already\s+(?:taken|in use)|"
         r"this username is not available|"
-        r"please try another username",
+        r"please try another username|"
+        r"username .*?(?:taken|in use)",
         re.I,
     )
     available_re = re.compile(r"username\s+(?:is\s+)?available", re.I)
 
-    for _ in range(8):
+    for _ in range(12):
         state = _evaluate(
             tab,
             """
             (() => {
               const el = document.querySelector('input[name="username"]') || document.querySelector('input[autocomplete="username"]');
+              const described = el?.getAttribute('aria-describedby') || '';
+              const describedText = described
+                .split(/\\s+/)
+                .map(id => document.getElementById(id)?.innerText || document.getElementById(id)?.textContent || '')
+                .join(' ');
               const container = el?.closest('form') || el?.parentElement || document.body;
-              const text = (container?.innerText || document.body?.innerText || '').slice(0, 3000);
+              const alerts = [...document.querySelectorAll('[role="alert"], [aria-live="polite"], [aria-live="assertive"]')]
+                .map(x => x.innerText || x.textContent || '').join(' ');
+              const text = [container?.innerText || '', describedText, alerts].join(' ').slice(0, 5000);
               return {
                 value: el?.value || '',
                 invalid: el?.getAttribute('aria-invalid') || '',
@@ -221,28 +258,37 @@ def _username_available(tab: dict, username: str) -> bool:
             })()
             """,
         ) or {}
+        if state.get("value") != username:
+            return False
         text = str(state.get("text", ""))
-        if unavailable_re.search(text) or str(state.get("invalid", "")).lower() == "true":
+        invalid = str(state.get("invalid", "")).lower()
+        if unavailable_re.search(text) or invalid == "true":
             logging.info("Username unavailable: %s", username)
             return False
         if available_re.search(text):
-            logging.info("Username available: %s", username)
+            logging.info("Username confirmed available: %s", username)
             return True
         time.sleep(0.75)
 
-    logging.warning("Username availability was not confirmed by the normal signup UI: %s", username)
+    logging.warning("Username availability was not explicitly confirmed by the normal signup UI: %s", username)
     return False
 
 
 def _pick_available_username(tab: dict, candidates: list[str]) -> str | None:
+    if not _wait_for_username_field(tab):
+        logging.error("Signup username field never became available; refusing to continue.")
+        return None
+
     seen: set[str] = set()
     for candidate in candidates:
         candidate = str(candidate).strip()
         if not candidate or candidate.lower() in seen:
             continue
         seen.add(candidate.lower())
+        logging.info("Checking username before any other signup field: %s", candidate)
         if _username_available(tab, candidate):
             return candidate
+        logging.info("Rejected username candidate; trying next: %s", candidate)
     return None
 
 
@@ -267,12 +313,13 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
         logging.error("Per-account email, password and at least one username candidate are required.")
         return False
 
+    # Hard gate: username availability is the FIRST signup operation.
     selected_username = _pick_available_username(tab, candidates[:5])
     if not selected_username:
-        logging.error("No username candidate was confirmed available; signup will not be initiated.")
+        logging.error("No username candidate was explicitly confirmed available; signup will not be initiated or populated.")
         return False
     username = selected_username
-    logging.info("Selected available username: %s", username)
+    logging.info("Username gate passed; selected available username: %s", username)
 
     expression = """
     (values) => {
