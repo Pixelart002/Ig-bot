@@ -2,10 +2,24 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY ig_bot.py browser_assist.py stats.py workflow.py verification_bridge.py telegram_bot.py ./
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
 
-# Telegram control plane + HTTPS verification bridge. Lightpanda/CDP runs separately.
-CMD ["python", "-u", "telegram_bot.py"]
+COPY ig_bot.py browser_assist.py stats.py workflow.py verification_bridge.py telegram_bot.py start_lightpanda.sh ./
+RUN chmod +x start_lightpanda.sh
+
+ENV CDP_HOST=127.0.0.1
+ENV CDP_PORT=9222
+ENV CDP_URL=http://127.0.0.1:9222
+ENV VERIFICATION_HOST=0.0.0.0
+
+EXPOSE 8080
+
+CMD ["./start_lightpanda.sh"]
