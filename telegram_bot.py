@@ -40,30 +40,17 @@ def allowed(chat_id: int) -> bool:
     return not ids or str(chat_id) in ids
 
 
-def is_admin(chat_id: int) -> bool:
-    return str(chat_id) in parse_ids("SUPER_ADMIN_USER_IDS")
-
-
 def admin_ids() -> set[str]:
     return parse_ids("SUPER_ADMIN_USER_IDS")
 
 
 def audit(chat_id: int, action: str, status: str, identity: dict[str, Any] | None = None) -> None:
-    """Send a safe live activity event to every configured super admin.
-
-    Passwords are deliberately masked in admin activity messages. The full
-    generated credentials are delivered only to the requesting Telegram user.
-    """
     ids = admin_ids()
     if not ids:
         return
-    username = "—"
-    name = "—"
-    dob = "—"
-    if identity:
-        username = str((identity.get("usernames") or ["—"])[0])
-        name = str((identity.get("display_names") or ["—"])[0])
-        dob = str(identity.get("date_of_birth") or "—")
+    username = str((identity or {}).get("usernames", ["—"])[0])
+    name = str((identity or {}).get("display_names", ["—"])[0])
+    dob = str((identity or {}).get("date_of_birth") or "—")
     text = (
         "👁 *Super Admin Activity*\n\n"
         f"👤 User ID: `{chat_id}`\n"
@@ -176,7 +163,13 @@ def handle_callback(callback: dict[str, Any]) -> None:
         record("confirmed")
         audit(chat_id, "Create Account", "confirmed", session.identity)
         try:
-            tab, filled = start_signup(session.identity)
+            credentials = {
+                "email": os.getenv("IG_EMAIL", ""),
+                "password": str(session.identity.get("password", "")),
+                "username": str((session.identity.get("usernames") or [""])[0]),
+                "full_name": str((session.identity.get("display_names") or [""])[0]),
+            }
+            tab, filled = start_signup(credentials, session.identity)
             session.tab = tab
             session.status = "form_filled" if filled else "waiting"
             if filled:
