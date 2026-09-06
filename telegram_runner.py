@@ -5,18 +5,50 @@ import logging
 import os
 import time
 
+import requests
+
 import telegram_bot as bot
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-def configure_webhook() -> None:
-    base_url = (
+def _public_base_url() -> str:
+    return (
         os.getenv("VERIFICATION_BASE_URL")
         or os.getenv("PUBLIC_BASE_URL")
         or os.getenv("RENDER_EXTERNAL_URL")
         or ""
     ).rstrip("/")
+
+
+def _bridge_port() -> int:
+    return int(os.getenv("PORT", os.getenv("VERIFICATION_PORT", "8080")))
+
+
+def wait_for_bridge(timeout: int = 30) -> None:
+    """Wait until the local FastAPI bridge is serving before registering Telegram webhook."""
+    health_url = f"http://127.0.0.1:{_bridge_port()}/health"
+    deadline = time.time() + timeout
+    last_error: Exception | None = None
+
+    while time.time() < deadline:
+        try:
+            response = requests.get(health_url, timeout=2)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("ok") is True:
+                logging.info("Verification bridge is ready: %s", health_url)
+                return
+            last_error = RuntimeError(f"Unexpected bridge health response: {data}")
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            last_error = exc
+        time.sleep(0.5)
+
+    raise RuntimeError(f"Verification bridge did not become ready within {timeout}s: {last_error}")
+
+
+def configure_webhook() -> None:
+    base_url = _public_base_url()
     if not base_url:
         raise SystemExit("Set VERIFICATION_BASE_URL to the Render public URL")
 
@@ -44,7 +76,7 @@ def main() -> None:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN")
 
     bot.start_bridge()
-    time.sleep(1)
+    wait_for_bridge()
     configure_webhook()
 
     # Keep the Render web service alive. Telegram pushes updates to FastAPI;
