@@ -13,19 +13,18 @@ from typing import Any
 
 import requests
 
-from browser_assist import fill_otp, inspect_state, start_signup
+from browser_assist import inspect_state, start_signup
 from ig_bot import generate_identity
+from otp_poller import clear_otp_file, queue_otp_code, start_otp_polling
 from run_logger import log_event
 from stats import format_stats, record
-from verification_bridge import start_bridge
 from workflow import clear, create, get
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API = f"https://api.telegram.org/bot{TOKEN}" if TOKEN else ""
-PUBLIC_BASE_URL = os.getenv("VERIFICATION_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).rstrip("/")
 LOGIN_URL = "https://www.instagram.com/accounts/login/"
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-OTP_RE = re.compile(r"^[A-Za-z0-9]{4,32}$")
+OTP_RE = re.compile(r"^\d{6}$")
 
 
 def telegram_webhook_secret() -> str:
@@ -95,13 +94,12 @@ def identity_keyboard() -> dict[str, Any]:
 
 
 def verification_keyboard(session) -> dict[str, Any]:
-    rows: list[list[dict[str, str]]] = []
-    link = verification_link(session)
-    if link:
-        rows.append([{"text": "🔗 Open Verification Session", "url": link}])
-    rows.append([{"text": "🔍 Check Status", "callback_data": "check_status"}])
-    rows.append([{"text": "🏠 Main Menu", "callback_data": "menu"}, {"text": "🛑 Cancel", "callback_data": "cancel_session"}])
-    return {"inline_keyboard": rows}
+    return {
+        "inline_keyboard": [
+            [{"text": "🔍 Check Status", "callback_data": "check_status"}],
+            [{"text": "🏠 Main Menu", "callback_data": "menu"}, {"text": "🛑 Cancel", "callback_data": "cancel_session"}],
+        ]
+    }
 
 
 def answer_callback(callback_id: str, text: str) -> None:
@@ -118,22 +116,34 @@ def identity_text(identity: dict[str, Any], include_password: bool = True) -> st
     return "\n".join(lines)
 
 
-def verification_link(session) -> str:
-    if not PUBLIC_BASE_URL:
-        return ""
-    return f"{PUBLIC_BASE_URL}/v/{session.bridge_token}"
-
-
 def send_email_prompt(chat_id: int) -> None:
     tg("sendMessage", {"chat_id": chat_id, "text": "📧 *Email required*\n\nSend the email address you want to use for this registration.\n\nYou can cancel anytime.", "parse_mode": "Markdown", "reply_markup": cancel_keyboard()})
 
 
+def _notify_otp_result(session, ok: bool) -> None:
+    """Notify Telegram after the non-blocking file poller finishes."""
+    chat_id = session.chat_id
+    if ok:
+        audit(chat_id, "OTP", "submitted", session.identity)
+        try:
+            tg("sendMessage", {"chat_id": chat_id, "text": "✅ OTP entered from `otp.txt`.\n\nChecking the Instagram session…", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
+            send_session_status(chat_id)
+        except Exception as exc:
+            session.event("otp_notification_failed", "error", error_type=type(exc).__name__, error=str(exc)[:300])
+    else:
+        session.status = "otp_timeout"
+        audit(chat_id, "OTP", "timeout", session.identity)
+        tg("sendMessage", {"chat_id": chat_id, "text": "⌛ No valid 6-digit OTP was received within 45 seconds. Send a new 6-digit code when Instagram is still waiting for verification.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
+
+
 def send_otp_prompt(chat_id: int, session, status: str = "otp_required") -> None:
     session.status = status
+    clear_otp_file()
     record("otp_requested")
     session.event("otp_requested", "success")
-    audit(chat_id, "Create Account", "otp_required", session.identity)
-    text = "🔢 *OTP required*\n\nInstagram has requested a verification code.\n\nSend the OTP here and I will enter only the code you provide into the active verification field."
+    started = start_otp_polling(session, _notify_otp_result)
+    audit(chat_id, "Create Account", "otp_required", session.identity, "File polling started" if started else "File polling already active")
+    text = "🔢 *OTP required*\n\nInstagram has requested a verification code.\n\nSend the exact 6-digit code here. It will be silently written to the local `otp.txt` file and entered automatically.\n\nPolling: every 1.5s · timeout: 45s"
     tg("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
 
 
@@ -218,7 +228,7 @@ def send_session_status(chat_id: int) -> None:
         elif state["status"] == "captcha_required":
             record("verification_required")
             audit(chat_id, "Session Check", "captcha_required", session.identity or None)
-            tg("sendMessage", {"chat_id": chat_id, "text": "⚠️ *Manual verification required*\n\nComplete the CAPTCHA in the verification session, then press *Check Status* again.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
+            tg("sendMessage", {"chat_id": chat_id, "text": "⚠️ *Manual verification required*\n\nComplete the CAPTCHA in the local browser process, then press *Check Status* again.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
         elif session.identity and state["status"] == "completed":
             record("signup_completed", time.time() - session.started_at)
             audit(chat_id, "Create Account", "completed", session.identity)
@@ -231,13 +241,13 @@ def send_session_status(chat_id: int) -> None:
             clear(chat_id)
         else:
             audit(chat_id, "Session Check", state["status"], session.identity or None)
-            tg("sendMessage", {"chat_id": chat_id, "text": f"⏳ *Session status:* `{state['status']}`\n\nContinue the required step in the verification session, then check again.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
+            tg("sendMessage", {"chat_id": chat_id, "text": f"⏳ *Session status:* `{state['status']}`\n\nContinue the required step, then check again.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
     except Exception as exc:
         error = f"{type(exc).__name__}: {str(exc)}".replace("\n", " ")[:500]
         session.event("session_check_failed", "error", error=error)
         log_event(session.run_id, "session_check_exception", "error", error_type=type(exc).__name__, error=error)
         audit(chat_id, "Session Check", "failed", session.identity or None, error)
-        tg("sendMessage", {"chat_id": chat_id, "text": "❌ Could not check the browser session.\n\nThe session has been kept alive; press *Check Status* again. If the browser connection dropped, it will be reconnected automatically.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
+        tg("sendMessage", {"chat_id": chat_id, "text": "❌ Could not check the browser session.\n\nThe session has been kept alive; press *Check Status* again.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
 
 
 def handle_callback(callback: dict[str, Any]) -> None:
@@ -255,6 +265,7 @@ def handle_callback(callback: dict[str, Any]) -> None:
         return
     if data == "cancel_session":
         clear(chat_id)
+        clear_otp_file()
         audit(chat_id, "Session", "cancelled")
         tg("sendMessage", {"chat_id": chat_id, "text": "🛑 *Session cancelled.*\n\nYou are back at the main menu.", "parse_mode": "Markdown", "reply_markup": keyboard()})
         return
@@ -330,21 +341,14 @@ def handle_message(message: dict[str, Any]) -> None:
         generate_after_email(chat_id, text)
         return
     if session and session.tab and session.status == "otp_required" and OTP_RE.fullmatch(text):
-        try:
-            ok = fill_otp(session.tab, text)
-            audit(chat_id, "OTP", "submitted" if ok else "rejected", session.identity)
-            tg("sendMessage", {"chat_id": chat_id, "text": "✅ OTP entered.\n\nChecking the session…" if ok else "❌ I could not find the OTP field. Complete the verification page manually, then press Check Status.", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
-            if ok:
-                send_session_status(chat_id)
-        except Exception as exc:
-            session.event("otp_failed", "error", error=f"{type(exc).__name__}: {str(exc)[:300]}")
-            audit(chat_id, "OTP", "failed", session.identity, f"{type(exc).__name__}: {str(exc)[:300]}")
-            tg("sendMessage", {"chat_id": chat_id, "text": f"❌ OTP handling failed: `{type(exc).__name__}`", "parse_mode": "Markdown", "reply_markup": verification_keyboard(session)})
+        # Direct file-based OTP listener: never echo or transmit the code here.
+        if queue_otp_code(text):
+            session.event("otp_received_from_telegram", "success")
         return
     if text.lower() in {"/start", "start"}:
         tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Instagram Assistant*\n\nChoose an action:", "parse_mode": "Markdown", "reply_markup": keyboard()})
         return
-    tg("sendMessage", {"chat_id": chat_id, "text": "Use the buttons above or send the requested email/OTP when prompted.", "reply_markup": keyboard()})
+    tg("sendMessage", {"chat_id": chat_id, "text": "Use the buttons above or send the requested email/6-digit OTP when prompted.", "reply_markup": keyboard()})
 
 
 def process_update(update: dict[str, Any]) -> None:
@@ -356,27 +360,29 @@ def process_update(update: dict[str, Any]) -> None:
 
 def run_polling() -> None:
     offset = 0
+    try:
+        tg("deleteWebhook", {"drop_pending_updates": False})
+    except (requests.RequestException, RuntimeError, ValueError) as exc:
+        print(f"Telegram deleteWebhook warning: {exc}")
     while True:
         try:
-            response = tg("getUpdates", {"timeout": 50, "offset": offset})
+            response = tg("getUpdates", {"timeout": 50, "offset": offset, "allowed_updates": ["message", "callback_query"]})
             for update in response.get("result", []):
                 offset = max(offset, int(update["update_id"]) + 1)
-                process_update(update)
+                try:
+                    process_update(update)
+                except Exception as exc:
+                    chat_id = int(update.get("message", {}).get("chat", {}).get("id") or update.get("callback_query", {}).get("message", {}).get("chat", {}).get("id") or 0)
+                    if chat_id:
+                        audit(chat_id, "Polling Update Error", "failed", get(chat_id).identity if get(chat_id) else None, f"{type(exc).__name__}: {str(exc)[:300]}")
         except (requests.RequestException, ValueError, RuntimeError) as exc:
             print(f"Telegram polling error: {exc}")
             time.sleep(3)
 
 
 def configure_webhook() -> None:
-    base = PUBLIC_BASE_URL
-    if not base:
-        raise RuntimeError("VERIFICATION_BASE_URL or PUBLIC_BASE_URL is required for webhook mode")
-    secret = telegram_webhook_secret()
-    tg("setWebhook", {"url": f"{base}/telegram/webhook", "secret_token": secret})
+    raise RuntimeError("Webhook mode has been removed. Use direct Telegram getUpdates polling.")
 
 
 def start_bot() -> None:
-    if os.getenv("TELEGRAM_USE_POLLING", "false").lower() == "true":
-        run_polling()
-    else:
-        configure_webhook()
+    run_polling()
