@@ -6,6 +6,6 @@
     "browser": "node lightpanda_runner.js"
   },
   "dependencies": {
-    "@lightpanda/browser": "latest"
+    "@lightpanda/browser": "1.6.0"
   }
 }
