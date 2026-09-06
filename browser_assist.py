@@ -11,7 +11,7 @@ import os
 import sys
 import time
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 from websocket import create_connection
@@ -39,24 +39,66 @@ def cdp_version() -> dict:
     return response.json()
 
 
+def _browser_ws_url() -> str:
+    version = cdp_version()
+    ws_url = version.get("webSocketDebuggerUrl")
+    if not ws_url:
+        raise RuntimeError("CDP /json/version did not provide webSocketDebuggerUrl")
+    return ws_url
+
+
+def _page_ws_url(browser_ws_url: str, target_id: str) -> str:
+    parts = urlsplit(browser_ws_url)
+    if not parts.scheme or not parts.netloc:
+        raise RuntimeError(f"Invalid browser websocket URL: {browser_ws_url}")
+    suffix = parts.query
+    return f"{parts.scheme}://{parts.netloc}/devtools/page/{target_id}" + (f"?{suffix}" if suffix else "")
+
+
 def open_url(url: str) -> dict:
-    # CDP's /json/new is a state-changing endpoint and must be called with PUT.
-    # GET can return HTTP 405 on current Chrome-compatible CDP servers.
-    endpoint = f"{CDP_URL}/json/new?{quote(url, safe=':/?=&') }"
+    """Create a Lightpanda page through the CDP websocket.
+
+    Lightpanda's current CDP server does not implement Chrome's REST
+    /json/new tab-creation endpoint, so using PUT /json/new returns 404.
+    Target.createTarget is the supported CDP path.
+    """
     last_error: Exception | None = None
     for attempt in range(3):
+        ws = None
         try:
-            response = requests.put(endpoint, timeout=10)
-            _raise_for_status(response, "CDP PUT /json/new")
-            tab = response.json()
-            if not tab.get("webSocketDebuggerUrl"):
-                raise RuntimeError("CDP created a tab without webSocketDebuggerUrl")
-            return tab
-        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            browser_ws_url = _browser_ws_url()
+            ws = create_connection(browser_ws_url, timeout=10)
+            response = cdp_call(
+                ws,
+                "Target.createTarget",
+                {"url": url},
+                request_id=1,
+            )
+            if response.get("error"):
+                raise RuntimeError(f"CDP Target.createTarget failed: {response['error']}")
+            target_id = response.get("result", {}).get("targetId")
+            if not target_id:
+                raise RuntimeError("CDP Target.createTarget returned no targetId")
+
+            page_ws_url = _page_ws_url(browser_ws_url, target_id)
+            return {
+                "id": target_id,
+                "targetId": target_id,
+                "type": "page",
+                "url": url,
+                "webSocketDebuggerUrl": page_ws_url,
+            }
+        except (requests.RequestException, OSError, ValueError, RuntimeError) as exc:
             last_error = exc
             logging.warning("Open tab attempt %d/3 failed: %s", attempt + 1, exc)
             if attempt < 2:
                 time.sleep(1)
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
     assert last_error is not None
     raise last_error
 
