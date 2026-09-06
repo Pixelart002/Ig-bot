@@ -13,13 +13,15 @@ COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund \
     && npx @lightpanda/browser install
 
-COPY ig_bot.py browser_assist.py stats.py workflow.py run_logger.py verification_bridge.py telegram_bot.py telegram_runner.py start_lightpanda.sh lightpanda_runner.js ./
+# Copy every runtime module used by the Telegram/Lightpanda workflow.
+COPY ig_bot.py browser_assist.py stats.py workflow.py run_logger.py otp_poller.py verification_bridge.py telegram_bot.py telegram_runner.py start_lightpanda.sh lightpanda_runner.js ./
 RUN chmod +x start_lightpanda.sh
 
 ENV CDP_HOST=127.0.0.1
 ENV CDP_PORT=9222
 ENV CDP_URL=http://127.0.0.1:9222
 ENV VERIFICATION_HOST=0.0.0.0
+ENV OTP_FILE=/app/otp.txt
 
 EXPOSE 8080
 
