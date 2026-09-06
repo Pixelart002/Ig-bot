@@ -10,7 +10,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy every runtime module used by the Telegram/Lightpanda Cloud workflow.
-COPY ig_bot.py browser_assist.py stats.py workflow.py run_logger.py otp_poller.py verification_bridge.py telegram_bot.py telegram_runner.py start_lightpanda.sh ./
+COPY ig_bot.py browser_assist.py browser_assist_v2.py stats.py workflow.py run_logger.py otp_poller.py verification_bridge.py telegram_bot.py telegram_runner.py start_lightpanda.sh ./
 RUN chmod +x start_lightpanda.sh
 
 ENV VERIFICATION_HOST=0.0.0.0
