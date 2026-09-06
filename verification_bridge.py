@@ -84,25 +84,58 @@ def telegram_webhook(update: dict, x_telegram_bot_api_secret_token: str | None =
 
 @app.get("/v/{token}", response_class=HTMLResponse)
 def page(token: str):
+    """Render the live Lightpanda Instagram viewport, not a second browser session."""
     session_for(token)
     safe = escape(token)
     return HTMLResponse(f"""<!doctype html>
-<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Verification Session</title>
-<style>body{{font-family:system-ui;margin:0;background:#111;color:#eee;text-align:center}}header{{padding:12px}}#shot{{max-width:100%;height:auto;touch-action:none}}button{{padding:10px 14px;margin:5px;border:0;border-radius:8px}}#state{{font-size:14px;opacity:.8}}</style></head>
-<body><header><b>Manual Instagram Verification</b><div id="state">Loading…</div></header>
-<img id="shot" alt="Browser session">
-<div><button onclick="refresh()">↻ Refresh</button><button onclick="window.close()">Close</button></div>
-<p>Complete CAPTCHA/OTP/verification yourself. This bridge does not solve or bypass it.</p>
+<html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Instagram</title>
+<style>
+html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#fff}}
+body{{font-family:system-ui,-apple-system,sans-serif;display:flex;flex-direction:column}}
+#browser{{position:relative;flex:1;min-height:0;background:#fff;display:flex;align-items:center;justify-content:center}}
+#shot{{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;touch-action:none;user-select:none;-webkit-user-drag:none}}
+#bar{{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;align-items:center;gap:8px;padding:8px 10px;padding-bottom:calc(8px + env(safe-area-inset-bottom));background:rgba(0,0,0,.78);color:#fff;font-size:12px;backdrop-filter:blur(8px)}}
+#state{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;opacity:.9}}
+button{{border:0;border-radius:7px;padding:7px 10px;background:#fff;color:#111;font-weight:600}}
+#hint{{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:4;padding:5px 9px;border-radius:999px;background:rgba(0,0,0,.65);color:#fff;font-size:11px;pointer-events:none;opacity:.85}}
+</style></head>
+<body>
+<div id="browser"><div id="hint">Live Instagram session</div><img id="shot" alt="Live Instagram browser page"></div>
+<div id="bar"><span id="state">Loading Instagram…</span><button onclick="refresh()">↻</button></div>
 <script>
-const t='{safe}'; const img=document.getElementById('shot'); const state=document.getElementById('state');
+const t='{safe}';
+const img=document.getElementById('shot');
+const state=document.getElementById('state');
+let busy=false;
+async function json(url, options){{const r=await fetch(url, options); if(!r.ok) throw new Error(await r.text()); return r.json();}}
 async function refresh(){{
-  const s=await fetch('/v/'+t+'/state').then(r=>r.json()); state.textContent=s.status+' · '+s.url;
-  const b=await fetch('/v/'+t+'/screenshot').then(r=>r.json()); img.src='data:image/png;base64,'+b.image;
+  if(busy) return;
+  busy=true;
+  try{{
+    const s=await json('/v/'+t+'/state');
+    state.textContent=(s.url || 'Instagram')+' · '+s.status;
+    const b=await json('/v/'+t+'/screenshot');
+    img.src='data:image/png;base64,'+b.image;
+  }}catch(e){{state.textContent='Session unavailable';}}
+  finally{{busy=false;}}
 }}
-img.addEventListener('click',async e=>{{const r=img.getBoundingClientRect(); const x=e.offsetX*img.naturalWidth/r.width; const y=e.offsetY*img.naturalHeight/r.height; await fetch('/v/'+t+'/click',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{x,y}})}}); setTimeout(refresh,300);}});
-window.addEventListener('keydown',async e=>{{if(e.key.length===1) await fetch('/v/'+t+'/text',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:e.key}})}}); else if(e.key==='Enter') await fetch('/v/'+t+'/key?key=Enter',{{method:'POST'}}); setTimeout(refresh,150);}});
-refresh(); setInterval(refresh,2500);
+img.addEventListener('click',async e=>{{
+  const r=img.getBoundingClientRect();
+  if(!img.naturalWidth || !img.naturalHeight) return;
+  const x=(e.clientX-r.left)*img.naturalWidth/r.width;
+  const y=(e.clientY-r.top)*img.naturalHeight/r.height;
+  try{{await json('/v/'+t+'/click',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{x,y}})}});}}catch(_e){{}}
+  setTimeout(refresh,250);
+}});
+window.addEventListener('keydown',async e=>{{
+  if(e.key.length===1){{try{{await json('/v/'+t+'/text',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:e.key}})}});}}catch(_e){{}}}}
+  else if(e.key==='Enter'){{try{{await json('/v/'+t+'/key?key=Enter',{{method:'POST'}});}}catch(_e){{}}}}
+  else if(e.key==='Backspace'){{try{{await json('/v/'+t+'/key?key=Backspace',{{method:'POST'}});}}catch(_e){{}}}}
+  setTimeout(refresh,120);
+}});
+refresh();
+setInterval(refresh,2500);
 </script></body></html>""")
 
 
