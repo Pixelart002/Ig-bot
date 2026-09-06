@@ -1,7 +1,7 @@
-"""Lightpanda/CDP signup assistant.
+"""Lightpanda/CDP browser workflow helpers.
 
-Safe profile fields may be filled automatically. CAPTCHA, OTP, verification,
-and anti-bot controls remain manual.
+Account credentials are supplied per workflow. They are never written to the repo.
+CAPTCHA, OTP, verification, and anti-bot controls remain manual.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+from typing import Any
 from urllib.parse import quote
 
 import requests
@@ -47,18 +48,26 @@ def cdp_call(ws, method: str, params: dict | None = None, request_id: int = 1) -
     raise TimeoutError(f"Timed out waiting for CDP response: {method}")
 
 
-def fill_fields(tab: dict, identity: dict | None = None) -> bool:
-    email = os.getenv("IG_EMAIL")
-    password = os.getenv("IG_PASSWORD")
-    username = ((identity or {}).get("usernames") or [None])[0] or os.getenv("IG_USERNAME")
-    full_name = ((identity or {}).get("display_names") or [None])[0] or os.getenv("IG_FULL_NAME", "")
+def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: dict[str, Any] | None = None) -> bool:
+    credentials = credentials or {}
+    email = credentials.get("email") or os.getenv("IG_EMAIL")
+    password = credentials.get("password") or os.getenv("IG_PASSWORD")
+    username = credentials.get("username")
+    full_name = credentials.get("full_name", "")
+
+    if identity:
+        username = username or ((identity.get("usernames") or [None])[0])
+        full_name = full_name or ((identity.get("display_names") or [None])[0] or "")
+
     if not email or not password or not username:
-        logging.error("IG_EMAIL, IG_USERNAME and IG_PASSWORD are required for automatic field filling.")
+        logging.error("Per-account email, password and username are required.")
         return False
+
     ws_url = tab.get("webSocketDebuggerUrl")
     if not ws_url:
         logging.error("CDP tab did not provide a websocket debugger URL.")
         return False
+
     ws = create_connection(ws_url, timeout=15)
     try:
         time.sleep(3)
@@ -81,7 +90,7 @@ def fill_fields(tab: dict, identity: dict | None = None) -> bool:
           };
         }
         """
-        values = {"email": email, "password": password, "username": username, "fullName": full_name}
+        values = {"email": email, "password": password, "username": str(username), "fullName": str(full_name)}
         result = cdp_call(ws, "Runtime.evaluate", {"expression": f"({expression})({json.dumps(values)})", "returnByValue": True})
         filled = result.get("result", {}).get("result", {}).get("value", {})
         logging.info("Signup fields filled: %s", filled)
@@ -111,17 +120,23 @@ def inspect_state(tab: dict) -> dict:
         ws.close()
 
 
-def start_signup(identity: dict | None = None) -> tuple[dict, bool]:
+def start_signup(credentials: dict[str, str], identity: dict[str, Any] | None = None) -> tuple[dict, bool]:
     cdp_version()
     tab = open_signup()
-    filled = fill_fields(tab, identity)
+    filled = fill_fields(tab, credentials, identity)
     return tab, filled
 
 
 def main() -> int:
     try:
         version = cdp_version()
-        tab, filled = start_signup()
+        credentials = {
+            "email": os.getenv("IG_EMAIL", ""),
+            "password": os.getenv("IG_PASSWORD", ""),
+            "username": os.getenv("IG_USERNAME", ""),
+            "full_name": os.getenv("IG_FULL_NAME", ""),
+        }
+        tab, filled = start_signup(credentials)
         print(f"Connected: {version.get('Browser', 'unknown browser')}")
         print(f"Signup tab: {tab.get('url', SIGNUP_URL)}")
         print(f"Form fields filled: {filled}")
