@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Any
@@ -70,12 +71,7 @@ def open_url(url: str) -> dict:
             browser_ws_url = _browser_ws_url()
             ws = _create_browser_connection()
 
-            created = cdp_call(
-                ws,
-                "Target.createTarget",
-                {"url": url},
-                request_id=1,
-            )
+            created = cdp_call(ws, "Target.createTarget", {"url": url}, request_id=1)
             if created.get("error"):
                 raise RuntimeError(f"CDP Target.createTarget failed: {created['error']}")
             target_id = created.get("result", {}).get("targetId")
@@ -94,9 +90,6 @@ def open_url(url: str) -> dict:
             if not session_id:
                 raise RuntimeError("CDP Target.attachToTarget returned no sessionId")
 
-            # Keep the browser-level websocket alive for the lifetime of the tab.
-            # Reconnecting later can invalidate the attached session on some
-            # Lightpanda builds.
             return {
                 "id": target_id,
                 "targetId": target_id,
@@ -122,8 +115,6 @@ def open_url(url: str) -> dict:
             if attempt < 2:
                 time.sleep(1)
         finally:
-            # Do not close a successfully-attached websocket. The returned tab
-            # owns it. Close only connections that failed before returning.
             if ws is not None and last_error is not None:
                 try:
                     ws.close()
@@ -182,6 +173,79 @@ def close_tab(tab: dict) -> None:
         tab["_ws"] = None
 
 
+def _username_available(tab: dict, username: str) -> bool:
+    """Check availability through the normal signup username field/UI only.
+
+    This intentionally does not call Instagram's private/internal APIs. If the
+    normal page reports an error, the candidate is rejected; if the page gives
+    no clear availability signal after a short wait, we do not submit it.
+    """
+    expression = """
+    (candidate) => {
+      const el = document.querySelector('input[name="username"]') || document.querySelector('input[autocomplete="username"]');
+      if (!el) return {state:'missing'};
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(el, candidate);
+      el.dispatchEvent(new Event('input', {bubbles:true}));
+      el.dispatchEvent(new Event('change', {bubbles:true}));
+      el.dispatchEvent(new Event('blur', {bubbles:true}));
+      return {state:'entered'};
+    }
+    """
+    result = _evaluate(tab, f"({expression})({json.dumps(username)})")
+    if not result or result.get("state") != "entered":
+        return False
+
+    unavailable_re = re.compile(
+        r"username\s+(?:is\s+)?(?:not\s+available|unavailable)|"
+        r"username\s+(?:is\s+)?already\s+(?:taken|in use)|"
+        r"this username is not available|"
+        r"please try another username",
+        re.I,
+    )
+    available_re = re.compile(r"username\s+(?:is\s+)?available", re.I)
+
+    for _ in range(8):
+        state = _evaluate(
+            tab,
+            """
+            (() => {
+              const el = document.querySelector('input[name="username"]') || document.querySelector('input[autocomplete="username"]');
+              const container = el?.closest('form') || el?.parentElement || document.body;
+              const text = (container?.innerText || document.body?.innerText || '').slice(0, 3000);
+              return {
+                value: el?.value || '',
+                invalid: el?.getAttribute('aria-invalid') || '',
+                text
+              };
+            })()
+            """,
+        ) or {}
+        text = str(state.get("text", ""))
+        if unavailable_re.search(text) or str(state.get("invalid", "")).lower() == "true":
+            logging.info("Username unavailable: %s", username)
+            return False
+        if available_re.search(text):
+            logging.info("Username available: %s", username)
+            return True
+        time.sleep(0.75)
+
+    logging.warning("Username availability was not confirmed by the normal signup UI: %s", username)
+    return False
+
+
+def _pick_available_username(tab: dict, candidates: list[str]) -> str | None:
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate = str(candidate).strip()
+        if not candidate or candidate.lower() in seen:
+            continue
+        seen.add(candidate.lower())
+        if _username_available(tab, candidate):
+            return candidate
+    return None
+
+
 def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: dict[str, Any] | None = None) -> bool:
     credentials = credentials or {}
     email = credentials.get("email") or os.getenv("IG_EMAIL")
@@ -190,13 +254,25 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
     full_name = credentials.get("full_name", "")
     dob = (identity or {}).get("date_of_birth") or credentials.get("date_of_birth")
 
+    candidates: list[str] = []
     if identity:
-        username = username or ((identity.get("usernames") or [None])[0])
+        candidates.extend(str(x) for x in (identity.get("usernames") or []) if x)
+    if username:
+        candidates.append(str(username))
+
+    if identity:
         full_name = full_name or ((identity.get("display_names") or [None])[0] or "")
 
-    if not email or not password or not username:
-        logging.error("Per-account email, password and username are required.")
+    if not email or not password or not candidates:
+        logging.error("Per-account email, password and at least one username candidate are required.")
         return False
+
+    selected_username = _pick_available_username(tab, candidates[:5])
+    if not selected_username:
+        logging.error("No username candidate was confirmed available; signup will not be initiated.")
+        return False
+    username = selected_username
+    logging.info("Selected available username: %s", username)
 
     expression = """
     (values) => {
