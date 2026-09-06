@@ -25,8 +25,6 @@ def _clean_json_text(text: str) -> str:
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
     text = re.sub(r"\s*```$", "", text)
-    # Small instruct/coder models sometimes add a short sentence before/after
-    # the JSON despite the prompt. Extract the outermost JSON object safely.
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
@@ -42,10 +40,7 @@ def ai_chat(system_prompt: str, user_prompt: str, max_tokens: int = 250) -> str 
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "options": {
-            "temperature": 0.9,
-            "num_predict": max_tokens,
-        },
+        "options": {"temperature": 0.9, "num_predict": max_tokens},
     }
     headers = {"Content-Type": "application/json"}
     if OLLAMA_TOKEN:
@@ -59,13 +54,8 @@ def ai_chat(system_prompt: str, user_prompt: str, max_tokens: int = 250) -> str 
                 json=payload,
                 timeout=90,
             )
-
             if response.status_code >= 400:
-                logging.error(
-                    "Ollama HTTP %s: %s",
-                    response.status_code,
-                    response.text[:1500],
-                )
+                logging.error("Ollama HTTP %s: %s", response.status_code, response.text[:1500])
                 response.raise_for_status()
 
             data: dict[str, Any] = response.json()
@@ -73,7 +63,6 @@ def ai_chat(system_prompt: str, user_prompt: str, max_tokens: int = 250) -> str 
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("Ollama returned no message content")
             return content.strip()
-
         except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
             if attempt == 3:
                 logging.error("Ollama request failed: %s", exc)
@@ -81,7 +70,6 @@ def ai_chat(system_prompt: str, user_prompt: str, max_tokens: int = 250) -> str 
             wait = min(15, 2 ** attempt)
             logging.warning("Ollama request failed; retrying in %ss: %s", wait, exc)
             time.sleep(wait)
-
     return None
 
 
@@ -106,6 +94,41 @@ def generate_dob(start_year: int = 2000, end_year: int = 2008) -> str:
     return (start + timedelta(days=secrets.randbelow((end - start).days + 1))).isoformat()
 
 
+def _local_identity(theme: str) -> dict[str, Any]:
+    """Safe last-resort identity generation when the AI service returns unusable output."""
+    suffix = secrets.token_hex(3)
+    compact = re.sub(r"[^a-z0-9]", "", theme.lower())[:8] or "tech"
+    return {
+        "display_names": ["Tech Codex AI", "Code Nova AI", "Digital Lab AI"],
+        "usernames": [
+            f"{compact}lab{suffix}",
+            f"codenova{suffix}",
+            f"techcodex{suffix}",
+            f"digitalai{suffix}",
+            f"aicodelab{suffix}",
+        ],
+        "bios": [
+            "Exploring coding, AI and technology.",
+            "Practical ideas from the world of code and AI.",
+            "Learning, building and sharing tech experiments.",
+        ],
+        "source": "local_fallback",
+    }
+
+
+def _validate_identity(parsed: Any) -> dict[str, Any]:
+    if not isinstance(parsed, dict):
+        raise ValueError("AI returned a non-object JSON value")
+    names = parsed.get("display_names")
+    usernames = parsed.get("usernames")
+    bios = parsed.get("bios")
+    if not all(isinstance(value, list) and value for value in (names, usernames, bios)):
+        raise ValueError("AI JSON is missing display_names, usernames, or bios")
+    if not all(isinstance(value, str) and value.strip() for value in (*names, *usernames, *bios)):
+        raise ValueError("AI JSON contains empty or non-string identity fields")
+    return parsed
+
+
 def generate_identity(theme: str = "AI, coding and technology") -> dict[str, Any] | None:
     """Generate a fresh profile identity and per-account generated metadata."""
     system_prompt = """You generate original Instagram profile identity ideas.
@@ -113,19 +136,26 @@ Return ONLY valid JSON with this exact shape:
 {"display_names":["...","...","..."],"usernames":["...","...","...","...","..."],"bios":["...","...","..."]}
 Rules: usernames 3-30 characters; letters, numbers, periods and underscores only; do not imitate or impersonate a real person or brand; no official-account claims; bios short and original."""
     result = ai_chat(system_prompt, f"Create a fresh profile identity around: {theme}", 300)
-    if not result:
-        return None
-    try:
-        parsed = json.loads(_clean_json_text(result))
-        if not isinstance(parsed, dict):
-            raise ValueError("AI returned a non-object JSON value")
-        parsed["password"] = generate_password()
-        parsed["date_of_birth"] = generate_dob(2000, 2008)
-        record("identity_generated")
-        return parsed
-    except (json.JSONDecodeError, ValueError) as exc:
-        logging.error("AI returned invalid identity JSON: %s", exc)
-        return None
+
+    parsed: dict[str, Any]
+    if result:
+        try:
+            parsed = _validate_identity(json.loads(_clean_json_text(result)))
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            logging.error(
+                "AI returned invalid identity JSON: %s; raw content=%r",
+                exc,
+                result[:1000],
+            )
+            parsed = _local_identity(theme)
+    else:
+        logging.error("AI identity generation returned no content; using local fallback")
+        parsed = _local_identity(theme)
+
+    parsed["password"] = generate_password()
+    parsed["date_of_birth"] = generate_dob(2000, 2008)
+    record("identity_generated")
+    return parsed
 
 
 def generate_caption(topic: str) -> str | None:
