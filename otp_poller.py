@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from browser_assist import _evaluate, fill_otp, inspect_state
+from browser_assist_v2 import _eval as _evaluate, fill_otp, inspect_state
 
 OTP_FILE = Path(os.getenv("OTP_FILE", "otp.txt"))
 OTP_INTERVAL = 1.5
@@ -64,7 +64,7 @@ def clear_otp_file() -> None:
 
 
 class CDPPage:
-    """Async page adapter over the existing Lightpanda CDP tab."""
+    """Async adapter over the existing Lightpanda CDP tab."""
 
     def __init__(self, tab: dict[str, Any]):
         self.tab = tab
@@ -74,17 +74,14 @@ class CDPPage:
 
 
 async def wait_for_otp(session) -> bool:
-    """Poll otp.txt every 1.5 seconds for up to 45 seconds."""
     tab = session.tab
     if not tab:
         session.event("otp_poll_failed", "error", error="Browser tab unavailable")
         return False
-
     page = CDPPage(tab)
     session.event("otp_poll_started", "success", interval_seconds=OTP_INTERVAL, timeout_seconds=OTP_TIMEOUT)
     for iteration in range(int(OTP_TIMEOUT / OTP_INTERVAL)):
         try:
-            # Keep Lightpanda active on every polling iteration.
             await page.evaluate("document.title")
             code = _read_and_delete_code()
             if code:
@@ -104,7 +101,6 @@ async def wait_for_otp(session) -> bool:
             error = f"{type(exc).__name__}: {str(exc)[:300]}".replace("\n", " ")
             session.event("otp_poll_iteration_failed", "error", iteration=iteration + 1, error=error)
         await asyncio.sleep(OTP_INTERVAL)
-
     session.event("otp_poll_timeout", "warning", timeout_seconds=OTP_TIMEOUT)
     return False
 
