@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: ig-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: HF_TOKEN
+        sync: false
+      - key: HF_MODEL
+        value: Qwen/Qwen2.5-7B-Instruct-1M
+      - key: TELEGRAM_ALLOWED_USER_IDS
+        sync: false
+      - key: SUPER_ADMIN_USER_IDS
+        sync: false
+      - key: VERIFICATION_BASE_URL
+        sync: false
+      - key: CDP_URL
+        value: http://127.0.0.1:9222
+      - key: CDP_HOST
+        value: 127.0.0.1
+      - key: CDP_PORT
+        value: 9222
+      - key: VERIFICATION_HOST
+        value: 0.0.0.0
