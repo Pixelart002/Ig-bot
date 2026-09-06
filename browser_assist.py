@@ -27,10 +27,7 @@ def _raise_for_status(response: requests.Response, operation: str) -> None:
         response.raise_for_status()
     except requests.HTTPError as exc:
         detail = response.text.strip().replace("\n", " ")[:300]
-        raise requests.HTTPError(
-            f"{operation}: HTTP {response.status_code} {response.reason}; {detail}",
-            response=response,
-        ) from exc
+        raise requests.HTTPError(f"{operation}: HTTP {response.status_code} {response.reason}; {detail}", response=response) from exc
 
 
 def cdp_version() -> dict:
@@ -40,7 +37,6 @@ def cdp_version() -> dict:
 
 
 def _browser_ws_url() -> str:
-    """Return the documented Lightpanda local browser CDP endpoint."""
     cdp_url = CDP_URL.rstrip("/")
     if cdp_url.startswith("https://"):
         return cdp_url.replace("https://", "wss://", 1)
@@ -50,66 +46,62 @@ def _browser_ws_url() -> str:
 
 
 def _create_browser_connection():
-    """Open a direct Lightpanda websocket without proxy or Origin interference."""
-    return create_connection(
-        _browser_ws_url(),
-        timeout=20,
-        http_proxy_host=None,
-        http_proxy_port=None,
-        http_no_proxy=["127.0.0.1", "localhost"],
-        suppress_origin=True,
-    )
+    return create_connection(_browser_ws_url(), timeout=20, http_proxy_host=None, http_proxy_port=None, http_no_proxy=["127.0.0.1", "localhost"], suppress_origin=True)
+
+
+def cdp_call(ws, method: str, params: dict | None = None, request_id: int = 1, session_id: str | None = None) -> dict:
+    message = {"id": request_id, "method": method, "params": params or {}}
+    if session_id:
+        message["sessionId"] = session_id
+    ws.send(json.dumps(message))
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        incoming = json.loads(ws.recv())
+        if incoming.get("id") == request_id:
+            return incoming
+    raise TimeoutError(f"Timed out waiting for CDP response: {method}")
+
+
+def _evaluate(tab: dict, expression: str) -> Any:
+    ws = tab.get("_ws")
+    session_id = tab.get("sessionId")
+    if ws is None or not session_id:
+        raise RuntimeError("CDP tab has no live browser websocket/session")
+    result = cdp_call(ws, "Runtime.evaluate", {"expression": expression, "returnByValue": True}, session_id=session_id)
+    if result.get("error"):
+        raise RuntimeError(f"CDP Runtime.evaluate failed: {result['error']}")
+    return result.get("result", {}).get("result", {}).get("value")
+
+
+def _prepare_page(tab: dict) -> None:
+    for method in ("Page.enable", "Runtime.enable", "Network.enable"):
+        result = cdp_call(tab["_ws"], method, session_id=tab["sessionId"])
+        if result.get("error"):
+            logging.warning("%s failed: %s", method, result["error"])
 
 
 def open_url(url: str) -> dict:
-    """Create, prepare, then navigate a Lightpanda page through browser-level CDP."""
     last_error: Exception | None = None
     for attempt in range(3):
         ws = None
         try:
             cdp_version()
-            browser_ws_url = _browser_ws_url()
             ws = _create_browser_connection()
-
-            # Start from a blank target so Page/Runtime/Network are enabled before
-            # Instagram navigation begins. This gives the browser a clean load cycle.
             created = cdp_call(ws, "Target.createTarget", {"url": "about:blank"}, request_id=1)
             if created.get("error"):
                 raise RuntimeError(f"CDP Target.createTarget failed: {created['error']}")
             target_id = created.get("result", {}).get("targetId")
             if not target_id:
                 raise RuntimeError("CDP Target.createTarget returned no targetId")
-
-            attached = cdp_call(
-                ws,
-                "Target.attachToTarget",
-                {"targetId": target_id, "flatten": True},
-                request_id=2,
-            )
+            attached = cdp_call(ws, "Target.attachToTarget", {"targetId": target_id, "flatten": True}, request_id=2)
             if attached.get("error"):
                 raise RuntimeError(f"CDP Target.attachToTarget failed: {attached['error']}")
             session_id = attached.get("result", {}).get("sessionId")
             if not session_id:
                 raise RuntimeError("CDP Target.attachToTarget returned no sessionId")
-
-            tab = {
-                "id": target_id,
-                "targetId": target_id,
-                "sessionId": session_id,
-                "type": "page",
-                "url": url,
-                "browserWebSocketDebuggerUrl": browser_ws_url,
-                "_ws": ws,
-            }
+            tab = {"id": target_id, "targetId": target_id, "sessionId": session_id, "type": "page", "url": url, "browserWebSocketDebuggerUrl": _browser_ws_url(), "_ws": ws}
             _prepare_page(tab)
-
-            navigated = cdp_call(
-                ws,
-                "Page.navigate",
-                {"url": url},
-                request_id=3,
-                session_id=session_id,
-            )
+            navigated = cdp_call(ws, "Page.navigate", {"url": url}, request_id=3, session_id=session_id)
             if navigated.get("error"):
                 raise RuntimeError(f"CDP Page.navigate failed: {navigated['error']}")
             time.sleep(5)
@@ -143,66 +135,6 @@ def open_signup() -> dict:
     return open_url(SIGNUP_URL)
 
 
-def cdp_call(
-    ws,
-    method: str,
-    params: dict | None = None,
-    request_id: int = 1,
-    session_id: str | None = None,
-) -> dict:
-    message = {"id": request_id, "method": method, "params": params or {}}
-    if session_id:
-        message["sessionId"] = session_id
-    ws.send(json.dumps(message))
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        incoming = json.loads(ws.recv())
-        if incoming.get("id") == request_id:
-            return incoming
-    raise TimeoutError(f"Timed out waiting for CDP response: {method}")
-
-
-def _evaluate(tab: dict, expression: str) -> Any:
-    ws = tab.get("_ws")
-    session_id = tab.get("sessionId")
-    if ws is None or not session_id:
-        raise RuntimeError("CDP tab has no live browser websocket/session")
-    result = cdp_call(
-        ws,
-        "Runtime.evaluate",
-        {"expression": expression, "returnByValue": True},
-        session_id=session_id,
-    )
-    if result.get("error"):
-        raise RuntimeError(f"CDP Runtime.evaluate failed: {result['error']}")
-    return result.get("result", {}).get("result", {}).get("value")
-
-
-def _prepare_page(tab: dict) -> None:
-    """Enable the page/runtime/network domains before real navigation."""
-    ws = tab.get("_ws")
-    session_id = tab.get("sessionId")
-    if ws is None or not session_id:
-        raise RuntimeError("Cannot prepare page without a live CDP session")
-    for method in ("Page.enable", "Runtime.enable", "Network.enable"):
-        result = cdp_call(ws, method, {}, session_id=session_id)
-        if result.get("error"):
-            raise RuntimeError(f"CDP {method} failed: {result['error']}")
-
-
-def _wait_for_username_field(tab: dict, attempts: int = 20, delay: float = 0.5) -> bool:
-    """Do not proceed until the real signup username input exists in the page DOM."""
-    for _ in range(attempts):
-        found = _evaluate(
-            tab,
-            "Boolean(document.querySelector('input[name=\"username\"]') || document.querySelector('input[autocomplete=\"username\"]'))",
-        )
-        if found:
-            return True
-        time.sleep(delay)
-    return False
-
-
 def close_tab(tab: dict) -> None:
     ws = tab.get("_ws")
     if ws is not None:
@@ -214,125 +146,78 @@ def close_tab(tab: dict) -> None:
 
 
 def _username_available(tab: dict, username: str) -> bool:
-    """Confirm availability only through the normal visible signup UI.
-
-    No private/internal Instagram endpoint is queried. Absence of an error is
-    never treated as proof of availability; the flow advances only when the
-    UI explicitly reports availability.
-    """
     expression = """
     (candidate) => {
       const el = document.querySelector('input[name="username"]') || document.querySelector('input[autocomplete="username"]');
       if (!el) return {state:'missing'};
-      el.focus();
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
       setter?.call(el, candidate);
       el.dispatchEvent(new Event('input', {bubbles:true}));
       el.dispatchEvent(new Event('change', {bubbles:true}));
       el.dispatchEvent(new Event('blur', {bubbles:true}));
-      return {state:'entered', value:el.value || ''};
+      return {state:'entered'};
     }
     """
     result = _evaluate(tab, f"({expression})({json.dumps(username)})")
-    if not result or result.get("state") != "entered" or result.get("value") != username:
+    if not result or result.get("state") != "entered":
         return False
-
-    unavailable_re = re.compile(
-        r"username\s+(?:is\s+)?(?:not\s+available|unavailable)|"
-        r"username\s+(?:is\s+)?already\s+(?:taken|in use)|"
-        r"this username is not available|"
-        r"please try another username|"
-        r"username .*?(?:taken|in use)",
-        re.I,
-    )
+    unavailable_re = re.compile(r"username\s+(?:is\s+)?(?:not\s+available|unavailable)|username\s+(?:is\s+)?already\s+(?:taken|in use)|this username is not available|please try another username", re.I)
     available_re = re.compile(r"username\s+(?:is\s+)?available", re.I)
-
-    for _ in range(12):
-        state = _evaluate(
-            tab,
-            """
-            (() => {
-              const el = document.querySelector('input[name="username"]') || document.querySelector('input[autocomplete="username"]');
-              const described = el?.getAttribute('aria-describedby') || '';
-              const describedText = described
-                .split(/\\s+/)
-                .map(id => document.getElementById(id)?.innerText || document.getElementById(id)?.textContent || '')
-                .join(' ');
-              const container = el?.closest('form') || el?.parentElement || document.body;
-              const alerts = [...document.querySelectorAll('[role="alert"], [aria-live="polite"], [aria-live="assertive"]')]
-                .map(x => x.innerText || x.textContent || '').join(' ');
-              const text = [container?.innerText || '', describedText, alerts].join(' ').slice(0, 5000);
-              return {
-                value: el?.value || '',
-                invalid: el?.getAttribute('aria-invalid') || '',
-                text
-              };
-            })()
-            """,
-        ) or {}
-        if state.get("value") != username:
-            return False
+    for _ in range(8):
+        state = _evaluate(tab, """
+        (() => {
+          const el = document.querySelector('input[name="username"]') || document.querySelector('input[autocomplete="username"]');
+          const container = el?.closest('form') || el?.parentElement || document.body;
+          return {value: el?.value || '', invalid: el?.getAttribute('aria-invalid') || '', text: (container?.innerText || document.body?.innerText || '').slice(0, 3000)};
+        })()
+        """) or {}
         text = str(state.get("text", ""))
-        invalid = str(state.get("invalid", "")).lower()
-        if unavailable_re.search(text) or invalid == "true":
+        if unavailable_re.search(text) or str(state.get("invalid", "")).lower() == "true":
             logging.info("Username unavailable: %s", username)
             return False
         if available_re.search(text):
-            logging.info("Username confirmed available: %s", username)
+            logging.info("Username available: %s", username)
             return True
         time.sleep(0.75)
-
-    logging.warning("Username availability was not explicitly confirmed by the normal signup UI: %s", username)
+    logging.warning("Username availability was not confirmed: %s", username)
     return False
 
 
 def _pick_available_username(tab: dict, candidates: list[str]) -> str | None:
-    if not _wait_for_username_field(tab):
-        logging.error("Signup username field never became available; refusing to continue.")
-        return None
-
     seen: set[str] = set()
     for candidate in candidates:
         candidate = str(candidate).strip()
         if not candidate or candidate.lower() in seen:
             continue
         seen.add(candidate.lower())
-        logging.info("Checking username before any other signup field: %s", candidate)
         if _username_available(tab, candidate):
             return candidate
-        logging.info("Rejected username candidate; trying next: %s", candidate)
     return None
+
+
+def select_available_username(tab: dict, identity: dict[str, Any]) -> str | None:
+    """Check generated candidates in order and return only a confirmed available username."""
+    candidates = [str(x) for x in (identity.get("usernames") or []) if str(x).strip()]
+    if not candidates:
+        return None
+    selected = _pick_available_username(tab, candidates[:5])
+    if selected:
+        identity["selected_username"] = selected
+        identity["username"] = selected
+    return selected
 
 
 def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: dict[str, Any] | None = None) -> bool:
     credentials = credentials or {}
+    identity = identity or {}
     email = credentials.get("email") or os.getenv("IG_EMAIL")
     password = credentials.get("password") or os.getenv("IG_PASSWORD")
-    username = credentials.get("username")
+    username = str(identity.get("selected_username") or credentials.get("username") or "").strip()
     full_name = credentials.get("full_name", "")
-    dob = (identity or {}).get("date_of_birth") or credentials.get("date_of_birth")
-
-    candidates: list[str] = []
-    if identity:
-        candidates.extend(str(x) for x in (identity.get("usernames") or []) if x)
-    if username:
-        candidates.append(str(username))
-
-    if identity:
-        full_name = full_name or ((identity.get("display_names") or [None])[0] or "")
-
-    if not email or not password or not candidates:
-        logging.error("Per-account email, password and at least one username candidate are required.")
+    dob = identity.get("date_of_birth") or credentials.get("date_of_birth")
+    if not email or not password or not username:
+        logging.error("Email, password and confirmed selected username are required.")
         return False
-
-    # Hard gate: username availability is the FIRST signup operation.
-    selected_username = _pick_available_username(tab, candidates[:5])
-    if not selected_username:
-        logging.error("No username candidate was explicitly confirmed available; signup will not be initiated or populated.")
-        return False
-    username = selected_username
-    logging.info("Username gate passed; selected available username: %s", username)
-
     expression = """
     (values) => {
       const setInput = (selectors, value) => {
@@ -374,8 +259,7 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
       };
     }
     """
-    values = {"email": email, "password": password, "username": str(username), "fullName": str(full_name), "dob": str(dob or "")}
-
+    values = {"email": email, "password": password, "username": username, "fullName": str(full_name), "dob": str(dob or "")}
     last_result = None
     for attempt in range(15):
         result = _evaluate(tab, f"({expression})({json.dumps(values)})")
@@ -384,13 +268,11 @@ def fill_fields(tab: dict, credentials: dict[str, str] | None = None, identity: 
         if result and result.get("email") and result.get("password") and result.get("username"):
             return True
         time.sleep(1)
-
     logging.error("Signup fields could not be filled after 15 attempts: %s", last_result)
     return False
 
 
 def submit_signup(tab: dict) -> bool:
-    """Click the normal Instagram signup action only; CAPTCHA/OTP remains manual."""
     expression = """
     () => {
       const buttons = [...document.querySelectorAll('button')];
@@ -404,7 +286,6 @@ def submit_signup(tab: dict) -> bool:
 
 
 def fill_otp(tab: dict, otp: str) -> bool:
-    """Fill only a user-supplied verification code; never obtain or generate it."""
     otp = str(otp).strip()
     if not otp or len(otp) > 32 or not otp.isalnum():
         return False
@@ -423,7 +304,6 @@ def fill_otp(tab: dict, otp: str) -> bool:
     }
     """
     result = _evaluate(tab, f"({expression})({json.dumps(otp)})")
-    logging.info("OTP field result: %s", result)
     return bool(result and result.get("filled"))
 
 
@@ -446,6 +326,11 @@ def start_signup(credentials: dict[str, str], identity: dict[str, Any] | None = 
     cdp_version()
     tab = open_signup()
     try:
+        if identity and not identity.get("selected_username"):
+            selected = select_available_username(tab, identity)
+            if not selected:
+                close_tab(tab)
+                return tab, False
         filled = fill_fields(tab, credentials, identity)
         if filled:
             submit_signup(tab)
