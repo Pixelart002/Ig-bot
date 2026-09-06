@@ -213,9 +213,6 @@ def _username_available(tab: dict, username: str) -> bool:
         if available.search(text):
             return True
         time.sleep(0.75)
-    # Do not destroy a valid browser session just because Instagram did not
-    # expose an explicit availability string. The signup form remains subject
-    # to Instagram's normal validation when submitted.
     logging.info("Username has no negative signal; proceeding: %s", username)
     return True
 
@@ -252,13 +249,19 @@ def _page_snapshot(tab: dict) -> dict:
     return _evaluate(tab, expression) or {}
 
 
+def _username_input_present(tab: dict) -> bool:
+    expression = """()=>Boolean(document.querySelector('input[name=\"username\"]')||document.querySelector('input[autocomplete=\"username\"]'))"""
+    return bool(_evaluate(tab, expression))
+
+
 def _fill_dob(tab: dict, dob) -> bool:
     month, day, year = _dob_parts(dob)
     if not (month and day and year):
         return False
     payload = json.dumps({"m": month, "d": day, "y": year})
     expression = """(v)=>{const pick=(selectors,val)=>{const el=selectors.map(s=>document.querySelector(s)).find(Boolean);if(!el)return false;const option=[...el.options].find(x=>x.value===String(val)||x.textContent.trim()===String(val));if(!option)return false;el.value=option.value;el.dispatchEvent(new Event('change',{bubbles:true}));return true;};return {month:pick(['select[name=month]','select[aria-label*=\"Month\" i]'],v.m),day:pick(['select[name=day]','select[aria-label*=\"Day\" i]'],v.d),year:pick(['select[name=year]','select[aria-label*=\"Year\" i]'],v.y)};}"""
-    return bool(_evaluate(tab, expression + f"({payload})"))
+    result = _evaluate(tab, expression + f"({payload})")
+    return bool(result and result.get("month") and result.get("day") and result.get("year"))
 
 
 def _set_input(tab: dict, selectors: list[str], value: str) -> bool:
@@ -286,15 +289,27 @@ def _fill_visible_signup_step(tab, credentials: dict, identity: dict) -> str:
 
     email = credentials.get("email") or identity.get("email") or ""
     password = credentials.get("password") or identity.get("password") or ""
-    username = identity.get("selected_username") or identity.get("username") or credentials.get("username") or ""
     full_name = credentials.get("full_name") or identity.get("display_name") or ((identity.get("display_names") or [""])[0])
     dob = identity.get("date_of_birth") or credentials.get("date_of_birth") or ""
 
     changed = False
+
+    # Username is deliberately deferred until Instagram actually renders the
+    # username input. The signup flow is email -> OTP -> password -> username.
+    if _username_input_present(tab) and not identity.get("selected_username"):
+        selected = select_available_username(tab, identity)
+        if selected:
+            logging.info("Username selected at username step: %s", selected)
+        else:
+            logging.warning("Username step visible but no candidate accepted")
+
+    username = identity.get("selected_username") or identity.get("username") or credentials.get("username") or ""
+
     changed |= _set_input(tab, ['input[name="emailOrPhone"]', 'input[name="email"]', 'input[type="email"]', 'input[autocomplete="email"]'], str(email))
     changed |= _set_input(tab, ['input[name="password"]', 'input[type="password"]', 'input[autocomplete="new-password"]'], str(password))
     changed |= _set_input(tab, ['input[name="fullName"]', 'input[autocomplete="name"]'], str(full_name)) if full_name else False
-    changed |= _set_input(tab, ['input[name="username"]', 'input[autocomplete="username"]'], str(username))
+    if username and _username_input_present(tab):
+        changed |= _set_input(tab, ['input[name="username"]', 'input[autocomplete="username"]'], str(username))
     changed |= _fill_dob(tab, dob)
 
     if changed:
@@ -341,9 +356,8 @@ def fill_fields(tab: dict, credentials: dict | None = None, identity: dict[str, 
     identity = identity or {}
     email = credentials.get("email") or identity.get("email") or os.getenv("IG_EMAIL")
     password = credentials.get("password") or identity.get("password") or os.getenv("IG_PASSWORD")
-    username = str(identity.get("selected_username") or credentials.get("username") or "").strip()
-    if not email or not password or not username:
-        logging.error("Email, password and confirmed username are required")
+    if not email or not password:
+        logging.error("Email and password are required")
         return False
     for attempt in range(15):
         try:
@@ -396,14 +410,9 @@ def start_signup(credentials: dict[str, str], identity: dict[str, Any] | None = 
     tab = open_signup()
     try:
         identity = identity or {}
-        if identity and not identity.get("selected_username"):
-            selected = select_available_username(tab, identity)
-            if not selected:
-                logging.warning("No username candidate accepted; keeping session open")
-                return tab, False
+        # Do not inspect/select usernames on the initial email screen.
+        # The progression worker handles username only when its input exists.
         filled = fill_fields(tab, credentials, identity)
-        if filled:
-            submit_signup(tab)
         start_signup_progression(tab, credentials or {}, identity)
         return tab, filled
     except Exception:
