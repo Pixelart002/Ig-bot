@@ -39,7 +39,14 @@ def _ws_url() -> str:
 
 
 def _connect():
-    return create_connection(_ws_url(), timeout=30, http_proxy_host=None, http_proxy_port=None, http_no_proxy=["127.0.0.1", "localhost"], suppress_origin=True)
+    return create_connection(
+        _ws_url(),
+        timeout=30,
+        http_proxy_host=None,
+        http_proxy_port=None,
+        http_no_proxy=["127.0.0.1", "localhost"],
+        suppress_origin=True,
+    )
 
 
 def _call(ws, method, params=None, request_id=1, session_id=None):
@@ -59,6 +66,18 @@ def cdp_call(ws, method, params=None, request_id=1, session_id=None):
     return _call(ws, method, params, request_id=request_id, session_id=session_id)
 
 
+def _mark_dead(tab: dict):
+    tab["_connection_dead"] = True
+    ws = tab.get("_ws")
+    tab["_ws"] = None
+    tab["sessionId"] = None
+    if ws:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 def _eval(tab: dict, expression: str) -> Any:
     lock = tab.setdefault("_lock", threading.RLock())
     with lock:
@@ -68,17 +87,26 @@ def _eval(tab: dict, expression: str) -> Any:
         last = None
         for attempt in range(3):
             try:
-                result = _call(ws, "Runtime.evaluate", {"expression": expression, "returnByValue": True}, 100 + attempt, sid)
+                result = _call(
+                    ws,
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True, "awaitPromise": True},
+                    100 + attempt,
+                    sid,
+                )
                 if not result.get("error"):
-                    return result.get("result", {}).get("result", {}).get("value")
+                    value = result.get("result", {}).get("result", {})
+                    if value.get("subtype") == "error":
+                        raise RuntimeError(str(value))
+                    return value.get("value")
                 last = result["error"]
             except Exception as exc:
                 last = exc
                 if isinstance(exc, (BrokenPipeError, ConnectionError, OSError)):
-                    tab["_connection_dead"] = True
-                    tab["_ws"] = None
-                    tab["sessionId"] = None
-                    raise RuntimeError("Lightpanda CDP connection closed; connection-scoped target cannot be reattached") from exc
+                    _mark_dead(tab)
+                    raise RuntimeError(
+                        "Lightpanda CDP connection closed; connection-scoped target cannot be reattached"
+                    ) from exc
             time.sleep(0.4)
         raise RuntimeError(f"Runtime.evaluate failed: {last}")
 
@@ -86,33 +114,28 @@ def _eval(tab: dict, expression: str) -> Any:
 _evaluate = _eval
 
 
-def start_keepalive(tab: dict, interval: float = 10.0):
+def start_keepalive(tab: dict, interval: float = 5.0):
     stop = tab.setdefault("_keepalive_stop", threading.Event())
     old = tab.get("_keepalive_thread")
     if old and old.is_alive():
         return stop, old
-    ws = tab.get("_ws")
-    if ws is None:
+
+    if tab.get("_ws") is None:
         return stop, threading.current_thread()
 
     def loop():
-        logging.info("Network keepalive started for original Lightpanda WS connection")
-        while not stop.is_set() and tab.get("_ws") is ws:
+        logging.info("CDP application keepalive started on original Lightpanda connection")
+        while not stop.is_set() and tab.get("_ws") is not None:
             try:
-                ws.ping()
+                _eval(tab, "document.readyState")
             except Exception as exc:
-                tab["_connection_dead"] = True
-                logging.warning("Lightpanda original WS closed: %s", exc)
-                try:
-                    ws.close()
-                except Exception:
-                    pass
-                tab["_ws"] = None
-                tab["sessionId"] = None
-                break
+                if tab.get("_connection_dead"):
+                    logging.warning("Lightpanda original CDP connection closed: %s", exc)
+                    return
+                logging.debug("CDP keepalive iteration failed: %s", exc)
             stop.wait(interval)
 
-    thread = threading.Thread(target=loop, name="lightpanda-ws-keepalive", daemon=True)
+    thread = threading.Thread(target=loop, name="lightpanda-cdp-keepalive", daemon=True)
     tab["_keepalive_thread"] = thread
     thread.start()
     return stop, thread
@@ -139,6 +162,7 @@ def open_url(url: str) -> dict:
             sid = attached.get("result", {}).get("sessionId")
             if not sid:
                 raise RuntimeError(str(attached.get("error") or "No sessionId"))
+
             tab = {
                 "id": target,
                 "targetId": target,
@@ -154,12 +178,14 @@ def open_url(url: str) -> dict:
                 "_connection_dead": False,
             }
             for rid, method in enumerate(("Page.enable", "Runtime.enable", "Network.enable"), 10):
-                _call(ws, method, request_id=rid, session_id=sid)
+                with tab["_lock"]:
+                    _call(ws, method, request_id=rid, session_id=sid)
             logging.info("Lightpanda signup target attached; original CDP connection retained")
-            start_keepalive(tab, interval=10.0)
+            start_keepalive(tab, interval=5.0)
             return tab
         except (WebSocketBadStatusException, requests.RequestException, OSError, RuntimeError, TimeoutError, ValueError) as exc:
             last = exc
+            logging.warning("Lightpanda open attempt %s failed: %s", attempt + 1, exc)
             if ws:
                 try:
                     ws.close()
@@ -190,7 +216,21 @@ def close_tab(tab: dict):
 
 
 def _snapshot(tab: dict) -> dict:
-    expr = "()=>({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,7000),inputs:[...document.querySelectorAll('input,select')].map(e=>({tag:e.tagName,type:e.type||'',name:e.name||'',autocomplete:e.autocomplete||'',placeholder:e.placeholder||'',aria:e.getAttribute('aria-label')||'',disabled:!!e.disabled}))})()"
+    expr = """()=>({
+        url:location.href,
+        title:document.title,
+        readyState:document.readyState,
+        text:(document.body?.innerText||'').slice(0,7000),
+        inputs:[...document.querySelectorAll('input')].map((e,i)=>({
+            index:i,tag:e.tagName,type:e.type||'',name:e.name||'',autocomplete:e.autocomplete||'',
+            placeholder:e.placeholder||'',aria:e.getAttribute('aria-label')||'',disabled:!!e.disabled,
+            visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length),value:e.value||''
+        })),
+        buttons:[...document.querySelectorAll('button,[role=\\"button\\"]')].map((e,i)=>({
+            index:i,text:(e.innerText||e.textContent||e.getAttribute('aria-label')||'').trim(),disabled:!!e.disabled,
+            visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length)
+        }))
+    })()"""
     return _eval(tab, expr) or {}
 
 
@@ -202,46 +242,69 @@ def _match(item: dict, *words: str) -> bool:
 def _set_input(tab: dict, item: dict, value: str) -> bool:
     if not value:
         return False
-    payload = json.dumps({k: str(item.get(k) or "") for k in ("name", "autocomplete", "aria", "placeholder")} | {"value": str(value)})
-    expr = "(p)=>{const a=[['name',p.name],['autocomplete',p.autocomplete],['aria-label',p.aria],['placeholder',p.placeholder]];let el=null;for(const [k,v] of a){if(v){el=document.querySelector('input['+k+'=\"'+CSS.escape(v)+'\"]');if(el)break;}}if(!el)return false;const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;if(s)s.call(el,p.value);else el.value=p.value;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));return true;}"
+    payload = json.dumps({"index": item.get("index", -1), "value": str(value)})
+    expr = """(p)=>{
+        const all=[...document.querySelectorAll('input')];
+        let el=p.index>=0?all[p.index]:null;
+        if(!el){
+            el=all.find(x=>!x.disabled&&x.offsetParent!==null&&(!x.value||x.value===p.value));
+        }
+        if(!el)return false;
+        try{el.focus();}catch(e){}
+        const d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
+        if(d?.set)d.set.call(el,p.value);else el.value=p.value;
+        el.dispatchEvent(new Event('input',{bubbles:true}));
+        el.dispatchEvent(new Event('change',{bubbles:true}));
+        return el.value===p.value;
+    }"""
     return bool(_eval(tab, expr + f"({payload})"))
 
 
 def _click_primary(tab: dict) -> bool:
-    expr = "()=>{const b=[...document.querySelectorAll('button,[role=\"button\"]')].find(x=>{const t=(x.innerText||x.textContent||x.getAttribute('aria-label')||'').trim();return !x.disabled&&/^(next|continue|confirm|sign up|create account|submit|verify)$/i.test(t);});if(!b)return false;b.click();return true;}"
+    expr = r"""()=>{
+        const normalize=s=>(s||'').replace(/\s+/g,' ').trim().toLowerCase();
+        const wanted=/^(next|continue|confirm|sign up|create account|submit|verify|finish|done)$/i;
+        const buttons=[...document.querySelectorAll('button,[role="button"]')].filter(b=>!b.disabled&&(b.offsetWidth||b.offsetHeight||b.getClientRects().length));
+        let b=buttons.find(x=>wanted.test(normalize(x.innerText||x.textContent||x.getAttribute('aria-label'))));
+        if(!b)b=buttons.find(x=>/(next|continue|confirm|sign up|create account|verify)/i.test(normalize(x.innerText||x.textContent||x.getAttribute('aria-label'))));
+        if(!b)return false;b.click();return true;
+    }"""
     return bool(_eval(tab, expr))
 
 
 def _candidates(identity: dict) -> list[str]:
     seen=set(); out=[]
-    for raw in [identity.get("selected_username"), identity.get("username"), *(identity.get("usernames") or [])]:
+    for raw in [identity.get("selected_username"),identity.get("username"),*(identity.get("usernames") or [])]:
         value=re.sub(r"[^A-Za-z0-9._]+","_",str(raw or "").strip()).strip("._")[:30]
         if 3<=len(value)<=30 and value.lower() not in seen:
-            seen.add(value.lower()); out.append(value)
+            seen.add(value.lower());out.append(value)
     return out
 
 
 def _username_rejected(text: str) -> bool:
-    return bool(re.search(r"(username|user name).{0,100}(not available|unavailable|already taken|taken|in use|try another)", text, re.I|re.S) or re.search(r"this username is not available|please try another username", text, re.I))
+    return bool(re.search(r"(username|user name).{0,120}(not available|unavailable|already taken|taken|in use|try another)",text,re.I|re.S) or re.search(r"this username is not available|please try another username",text,re.I))
 
 
 def _handle_username(tab: dict, identity: dict) -> str:
     snap=_snapshot(tab)
-    item=next((i for i in snap.get("inputs",[]) if i.get("tag")=="INPUT" and _match(i,"username","user name","handle","screen name")),None)
-    if not item:
+    item=next((i for i in snap.get("inputs",[]) if i.get("visible") and not i.get("disabled") and _match(i,"username","user name","handle","screen name")),None)
+    if not item:return "username_waiting"
+    candidates=_candidates(identity)
+    if not candidates:
+        logging.warning("Username step reached, but identity has no usable username candidates")
         return "username_waiting"
     attempted=tab.setdefault("_attempted_usernames",set())
-    for candidate in _candidates(identity):
-        if candidate.lower() in attempted:
-            continue
+    for candidate in candidates:
+        if candidate.lower() in attempted:continue
         attempted.add(candidate.lower())
-        if not _set_input(tab,item,candidate):
-            continue
+        if not _set_input(tab,item,candidate):continue
         time.sleep(0.8)
-        if _username_rejected(str(_snapshot(tab).get("text",""))):
+        latest=_snapshot(tab)
+        if _username_rejected(str(latest.get("text",""))):
             logging.info("Username rejected: %s",candidate)
             continue
-        identity["selected_username"]=candidate; identity["username"]=candidate
+        identity["selected_username"]=candidate
+        identity["username"]=candidate
         logging.info("Username selected at username step: %s",candidate)
         _click_primary(tab)
         return "username_submitted"
@@ -249,31 +312,58 @@ def _handle_username(tab: dict, identity: dict) -> str:
 
 
 def _advance(tab: dict, credentials: dict, identity: dict) -> str:
-    snap=_snapshot(tab); text=str(snap.get("text","")); low=text.lower(); inputs=snap.get("inputs",[])
-    if any(x in low for x in ("confirmation code","security code","enter the code","confirm your email")):
+    snap=_snapshot(tab)
+    text=str(snap.get("text", ""))
+    low=text.lower()
+    inputs=[i for i in snap.get("inputs",[]) if i.get("visible") and not i.get("disabled")]
+
+    logging.debug(
+        "Signup DOM state url=%s ready=%s inputs=%s buttons=%s",
+        snap.get("url"),snap.get("readyState"),
+        [(i.get("index"),i.get("type"),i.get("name"),i.get("autocomplete"),i.get("placeholder"),i.get("aria")) for i in inputs],
+        [b.get("text") for b in snap.get("buttons",[]) if b.get("visible") and not b.get("disabled")],
+    )
+
+    if snap.get("readyState") == "loading":
+        return "waiting"
+    if any(x in low for x in ("confirmation code","security code","enter the code","confirm your email","enter the 6-digit code")):
         return "otp_required"
     if "captcha" in low or "security check" in low:
         return "captcha_required"
     if any(x in low for x in ("welcome to instagram","account created","your instagram profile")):
         return "completed"
-    password=next((i for i in inputs if i.get("tag")=="INPUT" and str(i.get("type")).lower()=="password"),None)
-    if password:
-        if _set_input(tab,password,str(credentials.get("password") or identity.get("password") or "")):
-            _click_primary(tab)
+
+    # REQUIRED ORDER: email -> OTP -> password -> username.
+    email=next((i for i in inputs if _match(i,"email","e-mail","emailaddress")),None)
+    if email and not str(email.get("value") or "").strip():
+        value=str(credentials.get("email") or identity.get("email") or "").strip()
+        if _set_input(tab,email,value):
+            logging.info("Signup step: email filled")
+            if _click_primary(tab):logging.info("Signup step: email submitted")
             return "progressed"
-    email=next((i for i in inputs if i.get("tag")=="INPUT" and _match(i,"email")),None)
-    if email:
-        if _set_input(tab,email,str(credentials.get("email") or identity.get("email") or "")):
-            _click_primary(tab)
+
+    password=next((i for i in inputs if str(i.get("type")).lower()=="password"),None)
+    if password and not str(password.get("value") or "").strip():
+        value=str(credentials.get("password") or identity.get("password") or "").strip()
+        if _set_input(tab,password,value):
+            logging.info("Signup step: password filled")
+            if _click_primary(tab):logging.info("Signup step: password submitted")
             return "progressed"
+
     username_result=_handle_username(tab,identity)
-    if username_result != "username_waiting":
+    if username_result!="username_waiting":
         return username_result
-    fullname=next((i for i in inputs if i.get("tag")=="INPUT" and _match(i,"full name","fullname","name")),None)
-    if fullname and identity.get("display_names"):
+
+    fullname=next((i for i in inputs if _match(i,"full name","fullname")),None)
+    if fullname and identity.get("display_names") and not str(fullname.get("value") or "").strip():
         if _set_input(tab,fullname,str(identity["display_names"][0])):
             _click_primary(tab)
             return "progressed"
+
+    if inputs:
+        logging.info("Signup still waiting; visible inputs=%s",[(i.get("index"),i.get("type"),i.get("placeholder"),i.get("aria")) for i in inputs])
+    else:
+        logging.info("Signup still waiting; no visible input detected; url=%s",snap.get("url"))
     return "waiting"
 
 
@@ -285,22 +375,19 @@ def _signup_worker(tab: dict, credentials: dict, identity: dict):
             state=_advance(tab,credentials,identity)
             tab["signup_state"]=state
             logging.info("Instagram signup state: %s",state)
-            if state in {"otp_required","captcha_required","completed"}:
-                return
+            if state in {"otp_required","captcha_required","completed"}:return
             if tab.get("_connection_dead"):
                 logging.warning("Signup progression stopped: original Lightpanda CDP connection is closed")
                 return
         except Exception as exc:
             logging.warning("Signup progression iteration failed: %s",exc)
-            if tab.get("_connection_dead"):
-                return
+            if tab.get("_connection_dead"):return
         stop.wait(1.5)
 
 
 def start_signup_progression(tab: dict, credentials: dict, identity: dict):
     old=tab.get("_signup_thread")
-    if old and old.is_alive():
-        return old
+    if old and old.is_alive():return old
     thread=threading.Thread(target=_signup_worker,args=(tab,credentials,identity),name="instagram-signup",daemon=True)
     tab["_signup_thread"]=thread
     thread.start()
@@ -319,14 +406,24 @@ def submit_signup(tab: dict) -> bool:
 
 def fill_otp(tab: dict, code: str) -> bool:
     payload=json.dumps(str(code).strip())
-    expr="(code)=>{const inputs=[...document.querySelectorAll('input')].filter(x=>!x.disabled&&x.offsetParent!==null);const el=inputs.find(x=>/otp|code|confirmation|verification/i.test((x.name||'')+' '+(x.autocomplete||'')+' '+(x.placeholder||'')+' '+(x.getAttribute('aria-label')||'')))||inputs.find(x=>x.maxLength===6)||inputs[0];if(!el)return false;const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;if(s)s.call(el,code);else el.value=code;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));const b=[...document.querySelectorAll('button,[role=\"button\"]')].find(x=>/^(confirm|continue|next|submit|verify)$/i.test((x.innerText||x.textContent||'').trim())&&!x.disabled);if(b)b.click();return true;}"
+    expr=r"""(code)=>{
+        const inputs=[...document.querySelectorAll('input')].filter(x=>!x.disabled&&(x.offsetWidth||x.offsetHeight||x.getClientRects().length));
+        const el=inputs.find(x=>/otp|code|confirmation|verification/i.test((x.name||'')+' '+(x.autocomplete||'')+' '+(x.placeholder||'')+' '+(x.getAttribute('aria-label')||'')))||inputs.find(x=>x.maxLength===6)||inputs[0];
+        if(!el)return false;
+        const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;
+        if(s)s.call(el,code);else el.value=code;
+        el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));
+        const normalize=s=>(s||'').replace(/\s+/g,' ').trim();
+        const b=[...document.querySelectorAll('button,[role="button"]')].find(x=>!x.disabled&&/^(confirm|continue|next|submit|verify)$/i.test(normalize(x.innerText||x.textContent||x.getAttribute('aria-label'))));
+        if(b)b.click();return true;
+    }"""
     return bool(_eval(tab,expr+f"({payload})"))
 
 
 def inspect_state(tab: dict) -> dict:
     try:
-        snap=_snapshot(tab); text=str(snap.get("text","")).lower()
-        if any(x in text for x in ("confirmation code","security code","enter the code","confirm your email")):
+        snap=_snapshot(tab);text=str(snap.get("text","")).lower()
+        if any(x in text for x in ("confirmation code","security code","enter the code","confirm your email","enter the 6-digit code")):
             status="otp_required"
         elif "captcha" in text or "security check" in text:
             status="captcha_required"
