@@ -28,9 +28,12 @@ def start_signup(credentials: dict, identity: dict):
                 state = _deterministic_advance(tab, credentials, identity)
                 tab["signup_state"] = state
                 break
-        except Exception:
+        except Exception as exc:
             if tab.get("_connection_dead"):
-                raise
+                logging.warning("Signup startup stopped: CDP connection is unavailable: %s", exc)
+                tab["signup_state"] = "connection_unavailable"
+                tab.get("_signup_stop").set()
+                return tab, False
         time.sleep(0.5)
 
     # start_signup_progression resolves _advance from browser_assist_v2 at

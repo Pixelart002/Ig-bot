@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 import requests
-from websocket import WebSocketBadStatusException, create_connection
+from websocket import WebSocketBadStatusException, WebSocketConnectionClosedException, WebSocketTimeoutException, create_connection
 
 CDP_URL = os.getenv("CDP_URL", "")
 SIGNUP_URL = "https://www.instagram.com/accounts/emailsignup/"
@@ -40,10 +40,13 @@ def _connect():
 def _call(ws,method,params=None,request_id=1,session_id=None):
     msg={"id":request_id,"method":method,"params":params or {}}
     if session_id: msg["sessionId"]=session_id
-    ws.send(json.dumps(msg)); deadline=time.time()+30
-    while time.time()<deadline:
-        incoming=json.loads(ws.recv())
-        if incoming.get("id")==request_id: return incoming
+    try:
+        ws.send(json.dumps(msg)); deadline=time.time()+30
+        while time.time()<deadline:
+            incoming=json.loads(ws.recv())
+            if incoming.get("id")==request_id: return incoming
+    except (WebSocketConnectionClosedException, WebSocketTimeoutException) as exc:
+        raise ConnectionError(f"CDP websocket unavailable during {method}") from exc
     raise TimeoutError(f"CDP timeout: {method}")
 
 
@@ -79,8 +82,11 @@ def _eval(tab:dict,expression:str)->Any:
                         else: last={"missing_value":True,"result":value}
             except Exception as exc:
                 last=exc
-                if isinstance(exc,(BrokenPipeError,ConnectionError,OSError)):
-                    _mark_dead(tab); raise RuntimeError("Lightpanda CDP connection closed; connection-scoped target cannot be reattached") from exc
+                if isinstance(exc,(BrokenPipeError,ConnectionError,OSError,WebSocketConnectionClosedException,WebSocketTimeoutException)):
+                    _mark_dead(tab)
+                    raise RuntimeError("Lightpanda CDP connection closed; connection-scoped target cannot be reattached") from exc
+            if tab.get("_connection_dead"):
+                raise RuntimeError("Lightpanda CDP connection is unavailable")
             time.sleep(.4)
         raise RuntimeError(f"Runtime.evaluate failed: {last}")
 

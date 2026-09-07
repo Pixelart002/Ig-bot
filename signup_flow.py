@@ -146,9 +146,12 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
         if any(x in low for x in ("confirmation code","security code","enter the code","confirm your email","enter the 6-digit code")):
             tab["signup_step"]=OTP_STEP; return "otp_required"
         email=next((i for i in inputs if _is_email(i)), None)
-        if email is not None: return "waiting"
+        if email is not None:
+            logging.info("Signup waiting at email transition: email control still visible")
+            return "waiting"
         if any(str(i.get("type")).lower()=="password" for i in inputs):
             tab["signup_step"]=PASSWORD_STEP; return "waiting"
+        logging.info("Signup waiting at email transition: no password/profile controls detected yet")
         tab["signup_step"]=PROFILE_STEP; return "waiting"
 
     if step == OTP_STEP: return "otp_required"
