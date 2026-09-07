@@ -82,6 +82,8 @@ async def wait_for_otp(session) -> bool:
     session.event("otp_poll_started", "success", interval_seconds=OTP_INTERVAL, timeout_seconds=OTP_TIMEOUT)
     for iteration in range(int(OTP_TIMEOUT / OTP_INTERVAL)):
         try:
+            # Keep the original CDP connection active while Telegram supplies
+            # the code. This never creates a second browser/target connection.
             await page.evaluate("document.title")
             code = _read_and_delete_code()
             if code:
@@ -90,7 +92,23 @@ async def wait_for_otp(session) -> bool:
                 ok = await asyncio.to_thread(fill_otp, tab, code)
                 if ok:
                     session.event("otp_submitted", "success")
+                    tab["signup_step"] = "password"
                     await asyncio.sleep(1.0)
+
+                    # Resume the same signup worker after OTP. Credentials are
+                    # retained on the original tab by browser_assist.start_signup.
+                    credentials = tab.get("_credentials") or session.identity or {}
+                    identity = tab.get("_identity") or session.identity or {}
+                    try:
+                        from browser_assist import start_signup_progression
+                        stop = tab.get("_signup_stop")
+                        if stop is not None and stop.is_set():
+                            tab["_signup_stop"] = threading.Event()
+                        start_signup_progression(tab, credentials, identity)
+                        session.event("signup_resumed_after_otp", "success")
+                    except Exception as exc:
+                        session.event("signup_resume_after_otp_failed", "error", error=f"{type(exc).__name__}: {str(exc)[:300]}")
+
                     state = await asyncio.to_thread(inspect_state, tab)
                     session.status = state.get("status", "waiting")
                     session.event("otp_post_check", "success", browser_status=session.status)
