@@ -3,30 +3,29 @@ from __future__ import annotations
 
 import time
 
+import browser_assist_v2 as _cdp
 from browser_assist_v2 import *
-from browser_assist_v2 import _advance, _evaluate
+from browser_assist_v2 import _evaluate
+from signup_flow import advance as _deterministic_advance
+
+# Keep the existing CDP transport/helpers, but replace the old field-order
+# heuristic with the deterministic screen-by-screen state machine.
+_cdp._advance = _deterministic_advance
 
 
 def start_signup(credentials: dict, identity: dict):
-    """Open Instagram and perform the first real CDP form action immediately.
-
-    The worker continues the same browser target/session while the page is in
-    waiting state. There is no frontend-only success path here: every form
-    action goes through the original Lightpanda CDP websocket.
-    """
+    """Open Instagram and execute the first real CDP signup action."""
     tab = open_signup()
+    tab["_credentials"] = dict(credentials)
+    tab["_identity"] = identity
 
-    # Wait briefly for the real document to leave the loading state, then
-    # execute the first available signup action synchronously. This prevents
-    # Telegram/UI state from reporting "started" while CDP has not actually
-    # touched the page yet.
     deadline = time.time() + 12.0
     state = "waiting"
     while time.time() < deadline:
         try:
             ready = _evaluate(tab, "document.readyState")
             if ready != "loading":
-                state = _advance(tab, credentials, identity)
+                state = _deterministic_advance(tab, credentials, identity)
                 tab["signup_state"] = state
                 break
         except Exception:
@@ -34,8 +33,9 @@ def start_signup(credentials: dict, identity: dict):
                 raise
         time.sleep(0.5)
 
-    # Keep actively executing against the same CDP target while waiting for
-    # the next Instagram screen/field. No reattach/new browser connection.
+    # start_signup_progression resolves _advance from browser_assist_v2 at
+    # runtime, so the patched deterministic implementation is used while the
+    # same original Lightpanda websocket/session remains alive.
     start_signup_progression(tab, credentials, identity)
     return tab, state in {"progressed", "otp_required", "captcha_required", "completed", "username_submitted"}
 
