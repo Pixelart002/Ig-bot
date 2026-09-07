@@ -16,7 +16,7 @@ COPY package.json package-lock.json* ./
 RUN npm install --omit=dev --no-audit --no-fund
 
 # Copy application/runtime files only after dependencies are installed.
-COPY ig_bot.py browser_assist.py browser_assist_v2.py stats.py workflow.py run_logger.py otp_poller.py verification_bridge.py telegram_bot.py telegram_runner.py start_lightpanda.sh lightpanda_runner.js ./
+COPY ig_bot.py browser_assist.py browser_assist_v2.py signup_flow.py stats.py workflow.py run_logger.py otp_poller.py verification_bridge.py telegram_bot.py telegram_runner.py start_lightpanda.sh lightpanda_runner.js ./
 RUN chmod +x start_lightpanda.sh
 
 ENV VERIFICATION_HOST=0.0.0.0
