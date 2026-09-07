@@ -22,14 +22,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 
 def _clean_json_text(text: str) -> str:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
-    text = re.sub(r"\s*```$", "", text)
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        text = text[start:end + 1]
-    return text.strip()
+    """Extract one complete JSON object without masking truncation errors."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("AI returned empty JSON content")
+    candidate = text.strip()
+    candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.I)
+    candidate = re.sub(r"\s*```\s*$", "", candidate)
+    decoder = json.JSONDecoder()
+    start = candidate.find("{")
+    if start < 0:
+        raise ValueError("AI response contains no JSON object")
+    try:
+        _, end = decoder.raw_decode(candidate[start:])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"AI JSON is malformed or truncated: {exc.msg} at character {start + exc.pos}") from exc
+    return candidate[start:start + end].strip()
 
 
 def ai_chat(system_prompt: str, user_prompt: str, max_tokens: int = 250) -> str | None:
@@ -161,12 +168,8 @@ Rules: usernames 3-30 characters; letters, numbers, periods and underscores only
         try:
             parsed = _validate_identity(json.loads(_clean_json_text(result)))
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
-            logging.error(
-                "AI returned invalid identity JSON: %s; raw content=%r",
-                exc,
-                result[:1000],
-            )
-            parsed = _local_identity(theme)
+            logging.error("AI identity validation failed: %s; raw content=%r", exc, result[:1000])
+            return None
     else:
         logging.error("AI identity generation returned no content; using local fallback")
         parsed = _local_identity(theme)

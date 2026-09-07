@@ -224,8 +224,13 @@ def _handle_username(tab:dict,identity:dict)->str:
 def _advance(tab:dict,credentials:dict,identity:dict)->str:
     snap=_snapshot(tab); text=str(snap.get("text","")); low=text.lower()
     inputs=[i for i in snap.get("inputs",[]) if i.get("visible") and not i.get("disabled")]
-    logging.info("Signup DOM snapshot: url=%s ready=%s visible_inputs=%s",snap.get("url"),snap.get("readyState"),[(i.get("index"),i.get("type"),i.get("name"),i.get("autocomplete"),i.get("placeholder"),i.get("aria"),bool(str(i.get("value") or "").strip())) for i in inputs])
-    if snap.get("readyState")=="loading":return "waiting"
+    step=str(tab.get("signup_step") or "form")
+    field_summary=[{"index":i.get("index"),"type":i.get("type"),"filled":bool(str(i.get("value") or "").strip())} for i in inputs]
+    logging.info("Signup diagnostics state=%s detected_fields=%s filled_fields=%s available_actions=%s", step, field_summary, [i["index"] for i in field_summary if i["filled"]], [str(b.get("text") or "").strip() for b in snap.get("buttons",[]) if b.get("visible") and not b.get("disabled")])
+    if snap.get("readyState")=="loading" and not inputs:
+        reason="DOM is loading and exposes no usable fields"
+        logging.info("Signup waiting reason=%s", reason)
+        return "waiting"
     if any(x in low for x in ("confirmation code","security code","enter the code","confirm your email","enter the 6-digit code")):return "otp_required"
     if "captcha" in low or "security check" in low:return "captcha_required"
     if any(x in low for x in ("welcome to instagram","account created","your instagram profile")):return "completed"
@@ -266,13 +271,25 @@ def _advance(tab:dict,credentials:dict,identity:dict)->str:
     complete=all(i is not None and bool(str(i.get("value") or "").strip()) for i in required)
     if complete:
         if _click_primary(tab):
-            logging.info("Signup form submitted through original Lightpanda CDP session")
+            logging.info("Signup selected_action=submit result=progressed")
             return "progressed"
-        logging.info("Signup fields filled; submit control not available yet; waiting for UI state change")
-        return "waiting"
+        reason="all required fields are filled but no deterministic submit action is available"
+        logging.warning("Signup blocked reason=%s", reason)
+        return "blocked"
 
-    if inputs: logging.info("Signup still waiting; visible inputs=%s",[(i.get("index"),i.get("type"),i.get("placeholder"),i.get("aria"),bool(str(i.get("value") or "").strip())) for i in inputs])
-    else: logging.info("Signup still waiting; no visible input detected; url=%s",snap.get("url"))
+    signature=repr([(i.get("index"),i.get("type"),bool(str(i.get("value") or "").strip())) for i in final_inputs])
+    previous=tab.get("_last_signup_signature")
+    tab["_last_signup_signature"]=signature
+    if inputs:
+        reason="required fields are not complete; no valid deterministic transition selected"
+        if previous == signature:
+            logging.warning("Signup manual_required reason=DOM stable across evaluations; %s", reason)
+            return "manual_required"
+        logging.info("Signup waiting reason=%s detected_fields=%s", reason, field_summary)
+    else:
+        reason="no visible usable fields or deterministic action detected"
+        logging.warning("Signup blocked reason=%s", reason)
+        return "blocked"
     return "waiting"
 
 
@@ -281,7 +298,7 @@ def _signup_worker(tab:dict,credentials:dict,identity:dict):
     while stop and not stop.is_set():
         try:
             state=_advance(tab,credentials,identity); tab["signup_state"]=state; logging.info("Instagram signup state: %s",state)
-            if state in {"otp_required","captcha_required","completed"}:return
+            if state in {"otp_required","captcha_required","completed","blocked","manual_required"}:return
             if tab.get("_connection_dead"):
                 logging.warning("Signup progression stopped: original Lightpanda CDP connection is closed"); return
         except Exception as exc:
