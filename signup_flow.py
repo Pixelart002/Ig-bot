@@ -87,10 +87,10 @@ def _username(tab: dict[str, Any], identity: dict[str, Any]) -> str:
         return "waiting"
     candidates=[]; seen=set()
     for raw in [identity.get("selected_username"), identity.get("username"), *(identity.get("usernames") or [])]:
-        value=re.sub(r"[^A-Za-z0-9._]+", "_", str(raw or "").strip()).strip("._")[:30]
+        value=re.sub(r"[^A-Za-z0-9._]+","_",str(raw or "").strip()).strip("._")[:30]
         if 3 <= len(value) <= 30 and value.lower() not in seen:
             seen.add(value.lower()); candidates.append(value)
-    attempted=tab.setdefault("_attempted_usernames", set())
+    attempted=tab.setdefault("_attempted_usernames",set())
     for candidate in candidates:
         if candidate.lower() in attempted: continue
         if not _fill_verify(tab,item,candidate): continue
@@ -117,10 +117,16 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
     step=tab.setdefault("signup_step",EMAIL_STEP)
     inputs=_visible_inputs(snap)
 
-    # Never fill password merely because its input is already mounted. The
-    # explicit step guarantees email is completed and submitted first.
     if step == EMAIL_STEP:
         email=next((i for i in inputs if _is_email(i)), None)
+        # Instagram/Lightpanda can expose the email control as a generic text
+        # input with no name/placeholder/autocomplete metadata. Since this is
+        # the explicit EMAIL_STEP, safely fall back to the first non-password,
+        # non-username text-like control instead of skipping to password.
+        if not email:
+            email=next((i for i in inputs if str(i.get("type","")).lower() in ("text","email","tel") and not _is_username(i)), None)
+            if email:
+                logging.info("Signup email field matched by generic text-input fallback: index=%s", email.get("index"))
         if not email: return "waiting"
         value=str(credentials.get("email") or identity.get("email") or "").strip()
         if _value(email) != value and not _fill_verify(tab,email,value): return "waiting"
@@ -132,23 +138,19 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
         return "waiting"
 
     if step == "email_transition":
-        # Re-scan the real screen after the click. OTP has priority; otherwise
-        # only then allow the password screen to be entered.
         if any(x in low for x in ("confirmation code","security code","enter the code","confirm your email","enter the 6-digit code")):
             tab["signup_step"]=OTP_STEP; return "otp_required"
         email=next((i for i in inputs if _is_email(i)), None)
-        if email is not None:
-            return "waiting"
+        if email is not None: return "waiting"
         if any(str(i.get("type")).lower()=="password" for i in inputs):
             tab["signup_step"]=PASSWORD_STEP; return "waiting"
         tab["signup_step"]=PROFILE_STEP; return "waiting"
 
-    if step == OTP_STEP:
-        return "otp_required"
+    if step == OTP_STEP: return "otp_required"
 
     if step == PASSWORD_STEP:
         password=next((i for i in inputs if str(i.get("type")).lower()=="password"), None)
-        if not password: return "waiting"
+        if not password:return "waiting"
         value=str(credentials.get("password") or identity.get("password") or "").strip()
         if _value(password) != value and not _fill_verify(tab,password,value): return "waiting"
         latest=cdp._snapshot(tab); before=_signature(latest)
@@ -159,12 +161,8 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
         return "waiting"
 
     if step == "profile_transition":
-        # Password may remain mounted during React's transition. Do not loop
-        # back into password; wait for it to disappear or for profile fields.
-        if any(_is_username(i) or _is_name(i) for i in inputs):
-            tab["signup_step"]=PROFILE_STEP
-        else:
-            return "waiting"
+        if any(_is_username(i) or _is_name(i) for i in inputs): tab["signup_step"]=PROFILE_STEP
+        else: return "waiting"
         step=PROFILE_STEP
 
     if step == PROFILE_STEP:
