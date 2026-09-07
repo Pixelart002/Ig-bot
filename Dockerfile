@@ -1,15 +1,15 @@
-FROM python:3.13-slim
+FROM node:22-bookworm-slim
 
 WORKDIR /app
 
-# Node.js/npm are required by the Lightpanda browser runner.
+# Python runtime for the FastAPI/Telegram control plane.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates nodejs npm \
+    && apt-get install -y --no-install-recommends python3 python3-pip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies in a cacheable layer.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Install the Lightpanda package in its own cacheable layer.
 COPY package.json package-lock.json* ./
