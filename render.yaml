@@ -8,6 +8,10 @@ services:
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      - key: HF_TOKEN
+        sync: false
+      - key: HF_MODEL
+        value: Qwen/Qwen2.5-7B-Instruct-1M
       - key: OLLAMA_URL
         value: https://vivekkumarr-my-ai.hf.space
       - key: OLLAMA_MODEL
@@ -22,5 +26,9 @@ services:
         sync: false
       - key: CDP_URL
         sync: false
+      - key: CDP_HOST
+        value: 127.0.0.1
+      - key: CDP_PORT
+        value: "9222"
       - key: VERIFICATION_HOST
         value: 0.0.0.0
