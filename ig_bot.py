@@ -169,7 +169,10 @@ Rules: usernames 3-30 characters; letters, numbers, periods and underscores only
             parsed = _validate_identity(json.loads(_clean_json_text(result)))
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             logging.error("AI identity validation failed: %s; raw content=%r", exc, result[:1000])
-            return None
+            # Small local models often ignore the requested candidate count.
+            # Continue with a valid local identity instead of stranding the
+            # Telegram workflow on an otherwise recoverable AI response.
+            parsed = _local_identity(theme)
     else:
         logging.error("AI identity generation returned no content; using local fallback")
         parsed = _local_identity(theme)

@@ -146,6 +146,10 @@ def close_tab(tab:dict):
     if stop: stop.set()
     ws=tab.get("_ws")
     if ws:
+        target_id=tab.get("targetId") or tab.get("id")
+        if target_id:
+            try: _call(ws,"Target.closeTarget",{"targetId":target_id},request_id=99)
+            except Exception: pass
         try: ws.close()
         except Exception: pass
     tab["_ws"]=None; tab["sessionId"]=None
