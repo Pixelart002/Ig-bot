@@ -106,7 +106,13 @@ def _username(tab: dict[str, Any], identity: dict[str, Any]) -> str:
 def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str, Any]) -> str:
     snap=cdp._snapshot(tab)
     low=str(snap.get("text", "")).lower()
-    if snap.get("readyState") == "loading": return "waiting"
+    inputs=_visible_inputs(snap)
+    logging.info("Signup deterministic DOM: url=%s ready=%s inputs=%s buttons=%s", snap.get("url"), snap.get("readyState"), [(i.get("index"),i.get("type"),i.get("name"),i.get("autocomplete"),i.get("placeholder"),i.get("aria"),bool(_value(i))) for i in inputs], [str(b.get("text") or "").strip() for b in snap.get("buttons",[]) if b.get("visible") and not b.get("disabled")])
+    # Lightpanda may report document.readyState=loading while the usable form
+    # controls are already exposed. Never block a real form just because the
+    # document lifecycle flag has not settled yet.
+    if snap.get("readyState") == "loading" and not inputs:
+        return "waiting"
     if any(x in low for x in ("confirmation code","security code","enter the code","confirm your email","enter the 6-digit code")):
         tab["signup_step"]=OTP_STEP; return "otp_required"
     if "captcha" in low or "security check" in low:
@@ -115,7 +121,6 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
         tab["signup_step"]=DONE_STEP; return "completed"
 
     step=tab.setdefault("signup_step",EMAIL_STEP)
-    inputs=_visible_inputs(snap)
 
     if step == EMAIL_STEP:
         email=next((i for i in inputs if _is_email(i)), None)
@@ -149,7 +154,7 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
     if step == OTP_STEP: return "otp_required"
 
     if step == PASSWORD_STEP:
-        password=next((i for i in inputs if str(i.get("type")).lower()=="password"), None)
+        password=next((i for i in inputs if str(i.get("type")).lower()=="password"),None)
         if not password:return "waiting"
         value=str(credentials.get("password") or identity.get("password") or "").strip()
         if _value(password) != value and not _fill_verify(tab,password,value): return "waiting"
