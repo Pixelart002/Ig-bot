@@ -15,6 +15,16 @@ PROFILE_STEP = "profile"
 DONE_STEP = "done"
 
 
+def _report(tab: dict[str, Any], event: str, **details: Any) -> None:
+    """Report a safe, value-free signup milestone to the control plane."""
+    callback = tab.get("_progress_callback")
+    if callable(callback):
+        try:
+            callback(event, **details)
+        except Exception:
+            logging.exception("Signup progress callback failed for %s", event)
+
+
 def _visible_inputs(snap: dict[str, Any]) -> list[dict[str, Any]]:
     return [i for i in snap.get("inputs", []) if i.get("visible") and not i.get("disabled")]
 
@@ -53,6 +63,14 @@ def _fill_verify(tab: dict[str, Any], item: dict[str, Any], value: str) -> bool:
     ok = bool(match and _value(match) == value)
     logging.info("Signup field verified index=%s type=%s ok=%s", item.get("index"), item.get("type"), ok)
     return ok
+
+
+def _dob_input(inputs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for item in inputs:
+        hint = " ".join(str(item.get(key, "")) for key in ("type", "name", "autocomplete", "placeholder", "aria")).lower()
+        if str(item.get("type", "")).lower() == "date" or any(word in hint for word in ("birth", "birthday", "date of birth", "dob")):
+            return item
+    return None
 
 
 def _click_action(tab: dict[str, Any]) -> bool:
@@ -131,7 +149,9 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
     if "captcha" in low or "security check" in low:
         tab["signup_step"]="manual_verification"; return "captcha_required"
     if any(x in low for x in ("welcome to instagram","account created","your instagram profile")):
-        tab["signup_step"]=DONE_STEP; return "completed"
+        tab["signup_step"]=DONE_STEP
+        _report(tab, "completed")
+        return "completed"
 
     step=tab.setdefault("signup_step",EMAIL_STEP)
 
@@ -148,8 +168,10 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
         if not email: return "waiting"
         value=str(credentials.get("email") or identity.get("email") or "").strip()
         if _value(email) != value and not _fill_verify(tab,email,value): return "waiting"
+        _report(tab, "email_filled")
         latest=cdp._snapshot(tab); before=_signature(latest)
         if _click_action(tab):
+            _report(tab, "submitted", step="email")
             tab["signup_step"]="email_transition"
             _wait_change(tab,before)
             return "progressed"
@@ -174,8 +196,10 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
         if not password:return "waiting"
         value=str(credentials.get("password") or identity.get("password") or "").strip()
         if _value(password) != value and not _fill_verify(tab,password,value): return "waiting"
+        _report(tab, "password_filled")
         latest=cdp._snapshot(tab); before=_signature(latest)
         if _click_action(tab):
+            _report(tab, "submitted", step="password")
             tab["signup_step"]="profile_transition"
             _wait_change(tab,before)
             return "progressed"
@@ -187,14 +211,27 @@ def advance(tab: dict[str, Any], credentials: dict[str, Any], identity: dict[str
         step=PROFILE_STEP
 
     if step == PROFILE_STEP:
+        dob = _dob_input(inputs)
+        dob_value = str(identity.get("date_of_birth") or "").strip()
+        if dob and dob_value and _value(dob) != dob_value:
+            if not _fill_verify(tab, dob, dob_value):
+                return "waiting"
+            _report(tab, "dob_filled")
         username_result=_username(tab,identity)
-        if username_result != "waiting": return username_result
+        if username_result != "waiting":
+            _report(tab, "username_filled")
+            _report(tab, "submitted", step="profile")
+            return username_result
         snap=cdp._snapshot(tab); name=next((i for i in _visible_inputs(snap) if _is_name(i)),None)
         names=identity.get("display_names") or []
         if name and names and not _value(name):
             if _fill_verify(tab,name,str(names[0])):
+                _report(tab, "name_filled")
                 latest=cdp._snapshot(tab); before=_signature(latest)
-                if _click_action(tab): _wait_change(tab,before); return "progressed"
+                if _click_action(tab):
+                    _report(tab, "submitted", step="profile")
+                    _wait_change(tab,before)
+                    return "progressed"
         return "waiting"
 
     return "waiting"

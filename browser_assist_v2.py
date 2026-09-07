@@ -69,7 +69,13 @@ def _eval(tab:dict,expression:str)->Any:
         last=None
         for attempt in range(3):
             try:
-                result=_call(ws,"Runtime.evaluate",{"expression":expression,"returnByValue":True,"awaitPromise":True},100+attempt,sid)
+                # All browser expressions issued by this module are synchronous
+                # DOM reads or event dispatches.  Asking Lightpanda to await a
+                # promise for them can race its garbage collector and produces
+                # CDP -32000 ("Promise was collected").  Do not opt into that
+                # promise lifecycle unless an asynchronous expression is added
+                # deliberately in the future.
+                result=_call(ws,"Runtime.evaluate",{"expression":expression,"returnByValue":True,"awaitPromise":False},100+attempt,sid)
                 if result.get("error"): last=result["error"]
                 else:
                     envelope=result.get("result",{}); exception=envelope.get("exceptionDetails")
@@ -113,6 +119,17 @@ def start_keepalive(tab:dict,interval:float=5.0):
 def stop_keepalive(tab:dict):
     event=tab.get("_keepalive_stop")
     if event: event.set()
+
+
+def capture_screenshot(tab: dict) -> str | None:
+    """Return the current page screenshot as base64 without opening another tab."""
+    lock = tab.setdefault("_lock", threading.RLock())
+    with lock:
+        ws, sid = tab.get("_ws"), tab.get("sessionId")
+        if ws is None or not sid:
+            return None
+        result = _call(ws, "Page.captureScreenshot", {"format": "png"}, 300, sid)
+    return result.get("result", {}).get("data")
 
 
 def open_url(url:str)->dict:

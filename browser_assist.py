@@ -13,11 +13,12 @@ from signup_flow import advance as _deterministic_advance
 _cdp._advance = _deterministic_advance
 
 
-def start_signup(credentials: dict, identity: dict):
+def start_signup(credentials: dict, identity: dict, on_progress=None):
     """Open Instagram and execute the first real CDP signup action."""
     tab = open_signup()
     tab["_credentials"] = dict(credentials)
     tab["_identity"] = identity
+    tab["_progress_callback"] = on_progress
 
     deadline = time.time() + 12.0
     state = "waiting"
