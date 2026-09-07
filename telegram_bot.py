@@ -1,6 +1,7 @@
 """Telegram control plane for the Lightpanda signup/login assistant."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import re
@@ -9,7 +10,7 @@ from typing import Any
 
 import requests
 
-from browser_assist import inspect_state, start_keepalive, start_signup
+from browser_assist import capture_screenshot, inspect_state, start_keepalive, start_signup
 from ig_bot import generate_identity
 from otp_poller import clear_otp_file, queue_otp_code, start_otp_polling
 from run_logger import log_event
@@ -100,6 +101,52 @@ def identity_text(identity: dict[str, Any], include_password: bool = True) -> st
 
 def verification_link(session) -> str:
     return ""
+
+
+def signup_progress_notifier(session):
+    """Build a safe Telegram notifier for background browser milestones."""
+    messages = {
+        "email_filled": "📧 Email filled.",
+        "name_filled": "👤 Name filled.",
+        "password_filled": "🔐 Password filled.",
+        "dob_filled": "🎂 Date of birth filled.",
+        "username_filled": "🔹 Username filled.",
+        "submitted": "📤 Form submitted; waiting for Instagram…",
+        "completed": "✅ Registration submitted successfully. Instagram has opened the new account session.",
+    }
+
+    def notify(event: str, **details: Any) -> None:
+        message = messages.get(event)
+        if not message:
+            return
+        session.event(f"signup_{event}", "success", **details)
+        try:
+            tg("sendMessage", {"chat_id": session.chat_id, "text": message, "reply_markup": verification_keyboard(session)})
+        except Exception as exc:
+            session.event("signup_progress_notify_failed", "warning", error=type(exc).__name__)
+
+    return notify
+
+
+def send_completion_screenshot(session) -> None:
+    """Send one screenshot from the existing logged-in browser tab."""
+    image = capture_screenshot(session.tab or {})
+    if not image:
+        session.event("completion_screenshot_unavailable", "warning")
+        return
+    try:
+        if not API:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
+        response = requests.post(
+            f"{API}/sendPhoto",
+            data={"chat_id": session.chat_id, "caption": "📸 Account session screenshot."},
+            files={"photo": ("instagram-session.png", base64.b64decode(image), "image/png")},
+            timeout=65,
+        )
+        response.raise_for_status()
+        session.event("completion_screenshot_sent", "success")
+    except Exception as exc:
+        session.event("completion_screenshot_failed", "warning", error=type(exc).__name__)
 
 
 def send_email_prompt(chat_id: int) -> None:
@@ -212,6 +259,10 @@ def send_session_status(chat_id: int) -> None:
             record("signup_completed", time.time() - session.started_at)
             audit(chat_id, "Create Account", "completed", session.identity)
             tg("sendMessage", {"chat_id": chat_id, "text": "🎉 *Registration completed successfully.*\n\n📊 Stats updated.", "parse_mode": "Markdown", "reply_markup": keyboard()})
+            # Instagram keeps the registration target authenticated after a
+            # successful signup, so use that same session rather than opening
+            # a second login flow before sending the requested confirmation.
+            send_completion_screenshot(session)
             clear(chat_id)
         else:
             audit(chat_id, "Session Check", state["status"], session.identity or None)
@@ -284,7 +335,7 @@ def handle_callback(callback: dict[str, Any]) -> None:
                 send_email_prompt(chat_id)
                 return
             record("confirmed")
-            tab, filled = start_signup(credentials, session.identity)
+            tab, filled = start_signup(credentials, session.identity, on_progress=signup_progress_notifier(session))
             session.tab = tab
             # Start immediately, before the first Telegram status check. This
             # removes the idle gap in which Lightpanda may drop its execution
