@@ -151,7 +151,9 @@ var body=document.body,text=body?(body.innerText||body.textContent||''):'';
 var nodes=document.getElementsByTagName('input'),inputs=[];
 for(var i=0;i<nodes.length;i++){var e=nodes[i],r=e.getBoundingClientRect?e.getBoundingClientRect():null;inputs.push({index:i,tag:e.tagName,type:e.type||'',name:e.name||'',autocomplete:e.autocomplete||'',placeholder:e.placeholder||'',aria:e.getAttribute('aria-label')||'',disabled:!!e.disabled,visible:!!(r?(r.width||r.height):(e.offsetWidth||e.offsetHeight)),value:e.value||''});}
 var all=document.getElementsByTagName('button'),buttons=[];
-for(var j=0;j<all.length;j++){var b=all[j],br=b.getBoundingClientRect?b.getBoundingClientRect():null;buttons.push({index:j,text:(b.innerText||b.textContent||b.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim(),disabled:!!b.disabled,visible:!!(br?(br.width||br.height):(b.offsetWidth||b.offsetHeight))});}
+for(var j=0;j<all.length;j++){var b=all[j],br=b.getBoundingClientRect?b.getBoundingClientRect():null;buttons.push({index:j,text:(b.innerText||b.textContent||b.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim(),disabled:!!b.disabled,visible:!!(br?(br.width||br.height):(b.offsetWidth||b.offsetHeight)),role:b.getAttribute('role')||''});}
+var roles=document.querySelectorAll?document.querySelectorAll('[role="button"]'):[];
+for(var k=0;k<roles.length;k++){var rb=roles[k],rr=rb.getBoundingClientRect?rb.getBoundingClientRect():null;if(rb.tagName!=='BUTTON')buttons.push({index:-1,text:(rb.innerText||rb.textContent||rb.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim(),disabled:rb.getAttribute('aria-disabled')==='true',visible:!!(rr?(rr.width||rr.height):(rb.offsetWidth||rb.offsetHeight)),role:'button'});}
 return {url:String(location.href||''),title:String(document.title||''),readyState:String(document.readyState||''),text:String(text).slice(0,7000),inputs:inputs,buttons:buttons};})()"""
     snap=_eval(tab,expr)
     if not isinstance(snap,dict): raise RuntimeError(f"Lightpanda snapshot returned unexpected value: {type(snap).__name__}")
@@ -166,12 +168,12 @@ def _match(item:dict,*words:str)->bool:
 def _set_input(tab:dict,item:dict,value:str)->bool:
     if not value:return False
     payload=json.dumps({"index":item.get("index",-1),"value":str(value)})
-    expr="""(function(p){var all=document.getElementsByTagName('input'),el=(p.index>=0&&p.index<all.length)?all[p.index]:null;if(!el||el.disabled){for(var i=0;i<all.length;i++){var x=all[i];if(!x.disabled&&(x.offsetWidth||x.offsetHeight)&&(!x.value||x.value===p.value)){el=x;break;}}}if(!el)return false;try{el.focus();}catch(e){}try{var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');if(d&&d.set)d.set.call(el,p.value);else el.value=p.value;}catch(e){el.value=p.value;}try{el.dispatchEvent(new Event('input',{bubbles:true}));}catch(e){}try{el.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}return el.value===p.value;})("""+payload+")"
+    expr="""(function(p){var all=document.getElementsByTagName('input'),el=(p.index>=0&&p.index<all.length)?all[p.index]:null;if(!el||el.disabled||!(el.offsetWidth||el.offsetHeight)){el=null;for(var i=0;i<all.length;i++){var x=all[i];if(!x.disabled&&(x.offsetWidth||x.offsetHeight)){var hint=(x.name||'')+' '+(x.autocomplete||'')+' '+(x.placeholder||'')+' '+(x.getAttribute('aria-label')||'');if(p.hint && hint.toLowerCase().indexOf(p.hint.toLowerCase())>=0){el=x;break;}if(!el)el=x;}}}if(!el)return false;try{el.focus();}catch(e){}try{var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');if(d&&d.set)d.set.call(el,p.value);else el.value=p.value;}catch(e){try{el.value=p.value;}catch(e2){return false;}}try{el.dispatchEvent(new Event('input',{bubbles:true,cancelable:true}));}catch(e){}try{el.dispatchEvent(new Event('change',{bubbles:true,cancelable:true}));}catch(e){}try{el.dispatchEvent(new Event('blur',{bubbles:true,cancelable:true}));}catch(e){}return String(el.value||'')===String(p.value);})({index:"""+str(item.get("index",-1))+",value:"""+json.dumps(str(value))+",hint:"""+json.dumps(" ".join(str(item.get(k,"")) for k in ("name","autocomplete","placeholder","aria")))+"})"""
     return bool(_eval(tab,expr))
 
 
 def _click_primary(tab:dict)->bool:
-    expr=r"""(function(){function norm(s){return String(s||'').replace(/\s+/g,' ').trim().toLowerCase();}var wanted=/^(next|continue|confirm|sign up|create account|submit|verify|finish|done)$/i,buttons=document.getElementsByTagName('button'),fallback=null;for(var i=0;i<buttons.length;i++){var b=buttons[i];if(b.disabled||!(b.offsetWidth||b.offsetHeight))continue;var label=norm(b.innerText||b.textContent||b.getAttribute('aria-label'));if(wanted.test(label)){b.click();return true;}if(!fallback&&/(next|continue|confirm|sign up|create account|verify)/i.test(label))fallback=b;}if(fallback){fallback.click();return true;}return false;})()"""
+    expr=r"""(function(){function norm(s){return String(s||'').replace(/\s+/g,' ').trim().toLowerCase();}function good(s){return /^(next|continue|confirm|sign up|create account|submit|verify|finish|done|complete|register)$/i.test(norm(s));}function click(el){try{el.focus();}catch(e){}try{el.click();return true;}catch(e){}try{el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));return true;}catch(e){return false;}}var buttons=document.getElementsByTagName('button'),fallback=null;for(var i=0;i<buttons.length;i++){var b=buttons[i];if(b.disabled||!(b.offsetWidth||b.offsetHeight))continue;var label=norm(b.innerText||b.textContent||b.getAttribute('aria-label'));if(good(label))return click(b);if(!fallback&&/(next|continue|confirm|sign up|create account|verify|complete|register)/i.test(label))fallback=b;}if(fallback)return click(fallback);var roles=document.querySelectorAll?document.querySelectorAll('[role="button"]'):[];for(var j=0;j<roles.length;j++){var r=roles[j];if(r.getAttribute('aria-disabled')==='true'||!(r.offsetWidth||r.offsetHeight))continue;var rl=norm(r.innerText||r.textContent||r.getAttribute('aria-label'));if(good(rl)||/(next|continue|confirm|sign up|create account|verify|complete|register)/i.test(rl))return click(r);}return false;})()"""
     return bool(_eval(tab,expr))
 
 
@@ -184,7 +186,7 @@ def _candidates(identity:dict)->list[str]:
 
 
 def _username_rejected(text:str)->bool:
-    return bool(re.search(r"(username|user name).{0,120}(not available|unavailable|already taken|taken|in use|try another)",text,re.I|re.S) or re.search(r"this username is not available|please try another username",text,re.I))
+    return bool(re.search(r"(username|user name).{0,160}(not available|unavailable|already taken|taken|in use|try another)",text,re.I|re.S) or re.search(r"this username is not available|please try another username",text,re.I))
 
 
 def _handle_username(tab:dict,identity:dict)->str:
@@ -194,10 +196,17 @@ def _handle_username(tab:dict,identity:dict)->str:
     candidates=_candidates(identity)
     if not candidates:return "username_waiting"
     attempted=tab.setdefault("_attempted_usernames",set())
+    # Once a username has been successfully written, keep it. Do not cycle
+    # through every candidate on every worker tick.
+    current=str(item.get("value") or "").strip()
+    if current:
+        if not _username_rejected(str(snap.get("text",""))):
+            identity["selected_username"]=current; identity["username"]=current
+            return "username_filled"
     for candidate in candidates:
         if candidate.lower() in attempted:continue
         if not _set_input(tab,item,candidate):continue
-        attempted.add(candidate.lower()); time.sleep(.5); latest=_snapshot(tab)
+        attempted.add(candidate.lower()); time.sleep(.7); latest=_snapshot(tab)
         if _username_rejected(str(latest.get("text",""))):
             logging.info("Username rejected: %s",candidate); continue
         identity["selected_username"]=candidate; identity["username"]=candidate
@@ -220,28 +229,25 @@ def _advance(tab:dict,credentials:dict,identity:dict)->str:
     text_inputs=[i for i in inputs if str(i.get("type")).lower() in ("text","email","tel") and i is not username]
     email=next((i for i in text_inputs if _match(i,"email","e-mail","emailaddress","phone","mobile")),None)
     fullname=next((i for i in text_inputs if _match(i,"full name","fullname","name")),None)
-
-    # Instagram can render the entire signup form at once. Lightpanda may expose
-    # empty name/autocomplete attributes, so use DOM order only as a fallback:
-    # first generic text field = email/phone, second generic text field = full name.
     if email is None and text_inputs: email=text_inputs[0]
     if fullname is None and len(text_inputs)>1: fullname=text_inputs[1]
 
+    changed=False
     if email and not str(email.get("value") or "").strip():
         value=str(credentials.get("email") or identity.get("email") or "").strip()
-        if _set_input(tab,email,value): logging.info("Signup step: email filled")
+        if _set_input(tab,email,value): logging.info("Signup step: email filled"); changed=True
     if fullname and identity.get("display_names") and not str(fullname.get("value") or "").strip():
-        if _set_input(tab,fullname,str(identity["display_names"][0])): logging.info("Signup step: full name filled")
+        if _set_input(tab,fullname,str(identity["display_names"][0])): logging.info("Signup step: full name filled"); changed=True
     if password and not str(password.get("value") or "").strip():
         value=str(credentials.get("password") or identity.get("password") or "").strip()
-        if _set_input(tab,password,value): logging.info("Signup step: password filled")
+        if _set_input(tab,password,value): logging.info("Signup step: password filled"); changed=True
 
     username_result=_handle_username(tab,identity) if username else "username_waiting"
-    if username_result=="username_waiting" and username:
-        logging.info("Signup waiting for a usable username candidate")
+    if username_result=="username_waiting" and username: logging.info("Signup waiting for a usable username candidate")
 
-    # Re-snapshot after filling so we submit only when the actual DOM contains
-    # the values. This avoids clicking Next/Sign up after only one field.
+    # Give React/Instagram one DOM turn after input/change/blur events, then
+    # verify every required field before pressing the submit control.
+    if changed or username_result=="username_filled": time.sleep(.35)
     final=_snapshot(tab)
     final_inputs=[i for i in final.get("inputs",[]) if i.get("visible") and not i.get("disabled")]
     final_password=next((i for i in final_inputs if str(i.get("type")).lower()=="password"),None)
@@ -249,7 +255,6 @@ def _advance(tab:dict,credentials:dict,identity:dict)->str:
     final_text=[i for i in final_inputs if str(i.get("type")).lower() in ("text","email","tel") and i is not final_username]
     final_email=next((i for i in final_text if _match(i,"email","e-mail","emailaddress","phone","mobile")),None) or (final_text[0] if final_text else None)
     final_fullname=next((i for i in final_text if _match(i,"full name","fullname","name")),None) or (final_text[1] if len(final_text)>1 else None)
-
     required=[final_email,final_password,final_username]
     if final_fullname and identity.get("display_names"): required.append(final_fullname)
     complete=all(i is not None and bool(str(i.get("value") or "").strip()) for i in required)
@@ -257,7 +262,7 @@ def _advance(tab:dict,credentials:dict,identity:dict)->str:
         if _click_primary(tab):
             logging.info("Signup form submitted through original Lightpanda CDP session")
             return "progressed"
-        logging.info("Signup fields filled; primary submit button not available yet")
+        logging.info("Signup fields filled; submit control not available yet; waiting for UI state change")
         return "waiting"
 
     if inputs: logging.info("Signup still waiting; visible inputs=%s",[(i.get("index"),i.get("type"),i.get("placeholder"),i.get("aria"),bool(str(i.get("value") or "").strip())) for i in inputs])
@@ -306,7 +311,7 @@ def fill_otp(tab:dict,code:str)->bool:
     if target is None: target=next((i for i in inputs if str(i.get("type")).lower() in ("text","tel","number")),None)
     if target is None:return False
     if not _set_input(tab,target,str(code)):return False
-    time.sleep(.2); return _click_primary(tab)
+    time.sleep(.3); return _click_primary(tab)
 
 
 def inspect_state(tab:dict)->dict:
