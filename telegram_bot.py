@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import html
+import logging
 import os
 import re
 import time
@@ -17,7 +19,9 @@ from stats import format_stats, record
 from verification_bridge import start_bridge
 from workflow import clear, create, get
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Shell snippets sometimes escape the token separator (``123\\:ABC``).  A
+# Telegram token never contains a backslash, so accept that copy/paste form.
+TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").replace("\\:", ":").strip()
 API = f"https://api.telegram.org/bot{TOKEN}" if TOKEN else ""
 PUBLIC_BASE_URL = os.getenv("VERIFICATION_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).rstrip("/")
 LOGIN_URL = "https://www.instagram.com/accounts/login/"
@@ -35,7 +39,11 @@ def tg(method: str, payload: dict[str, Any]) -> dict[str, Any]:
     if not API:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
     response = requests.post(f"{API}/{method}", json=payload, timeout=65)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = response.text[:500].replace("\n", " ")
+        raise requests.HTTPError(f"Telegram {method} failed: {detail}", response=response) from exc
     return response.json()
 
 
@@ -85,16 +93,22 @@ def verification_keyboard(session) -> dict[str, Any]:
 
 
 def answer_callback(callback_id: str, text: str) -> None:
-    tg("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:190], "show_alert": False})
+    try:
+        tg("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:190], "show_alert": False})
+    except requests.RequestException as exc:
+        # Expired callback queries return HTTP 400.  Still execute the action
+        # because Telegram may have delivered a valid button press late.
+        logging.warning("Could not acknowledge Telegram callback: %s", exc)
 
 
 def identity_text(identity: dict[str, Any], include_password: bool = True) -> str:
     names = identity.get("display_names", [])
     usernames = identity.get("usernames", [])
     bios = identity.get("bios", [])
-    lines = ["*Name:* " + str(names[0] if names else "—"), "*Username:* " + str(identity.get("selected_username") or (usernames[0] if usernames else "—")), "*DOB:* " + str(identity.get("date_of_birth", "—")), "*Bio:* " + str(bios[0] if bios else "—")]
+    value = lambda item: html.escape(str(item))
+    lines = ["<b>Name:</b> " + value(names[0] if names else "—"), "<b>Username:</b> " + value(identity.get("selected_username") or (usernames[0] if usernames else "—")), "<b>DOB:</b> " + value(identity.get("date_of_birth", "—")), "<b>Bio:</b> " + value(bios[0] if bios else "—")]
     if include_password:
-        lines.insert(2, "*Password:* `" + str(identity.get("password", "—")) + "`")
+        lines.insert(2, "<b>Password:</b> <code>" + value(identity.get("password", "—")) + "</code>")
     return "\n".join(lines)
 
 
@@ -168,7 +182,7 @@ def generate_after_email(chat_id: int, email: str) -> None:
     session.status = "identity_ready"
     session.event("identity_generated", "success")
     audit(chat_id, "Create Account", "identity_generated", identity)
-    tg("sendMessage", {"chat_id": chat_id, "text": "🆕 *Account Details*\n\n" + identity_text(identity) + f"\n*Email:* `{email}`\n\nReview the details, then continue.", "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
+    tg("sendMessage", {"chat_id": chat_id, "text": "🆕 <b>Account Details</b>\n\n" + identity_text(identity) + f"\n<b>Email:</b> <code>{html.escape(email)}</code>\n\nReview the details, then continue.", "parse_mode": "HTML", "reply_markup": identity_keyboard()})
 
 
 def regenerate_identity(chat_id: int) -> None:
@@ -187,7 +201,7 @@ def regenerate_identity(chat_id: int) -> None:
     session.identity = identity
     session.status = "identity_ready"
     audit(chat_id, "Create Account", "identity_regenerated", identity)
-    tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Fresh Account Details*\n\n" + identity_text(identity) + f"\n*Email:* `{email}`\n\nReview and continue.", "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
+    tg("sendMessage", {"chat_id": chat_id, "text": "🤖 <b>Fresh Account Details</b>\n\n" + identity_text(identity) + f"\n<b>Email:</b> <code>{html.escape(email)}</code>\n\nReview and continue.", "parse_mode": "HTML", "reply_markup": identity_keyboard()})
 
 
 def send_session_status(chat_id: int) -> None:
@@ -259,7 +273,7 @@ def handle_callback(callback: dict[str, Any]) -> None:
             session = create(chat_id, identity)
             session.status = "identity_ready"
         audit(chat_id, "Generate Identity", "ready", identity)
-        tg("sendMessage", {"chat_id": chat_id, "text": "🤖 *Identity Preview*\n\n" + identity_text(identity) + (f"\n*Email:* `{saved_email}`" if saved_email else ""), "parse_mode": "Markdown", "reply_markup": identity_keyboard()})
+        tg("sendMessage", {"chat_id": chat_id, "text": "🤖 <b>Identity Preview</b>\n\n" + identity_text(identity) + (f"\n<b>Email:</b> <code>{html.escape(saved_email)}</code>" if saved_email else ""), "parse_mode": "HTML", "reply_markup": identity_keyboard()})
         return
     if data == "regenerate_identity":
         regenerate_identity(chat_id)

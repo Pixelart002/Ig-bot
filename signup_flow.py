@@ -85,6 +85,19 @@ def _username(tab: dict[str, Any], identity: dict[str, Any]) -> str:
     item = next((i for i in _visible_inputs(snap) if _is_username(i)), None)
     if not item:
         return "waiting"
+    # A worker tick can run after Instagram has accepted a username but before
+    # the screen changes.  Keep that value instead of trying a different
+    # candidate on every tick (or incorrectly reporting that no candidates are
+    # left after the first one was attempted).
+    current = _value(item)
+    if current and not _username_rejected(str(snap.get("text", ""))):
+        identity["selected_username"] = current
+        identity["username"] = current
+        before = _signature(snap)
+        if _click_action(tab):
+            _wait_change(tab, before)
+            return "progressed"
+        return "waiting"
     candidates=[]; seen=set()
     for raw in [identity.get("selected_username"), identity.get("username"), *(identity.get("usernames") or [])]:
         value=re.sub(r"[^A-Za-z0-9._]+","_",str(raw or "").strip()).strip("._")[:30]

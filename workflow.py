@@ -36,12 +36,36 @@ _lock = threading.RLock()
 _sessions: dict[int, Session] = {}
 
 
+def _close_session_tab(session: Session) -> None:
+    """Stop background browser work before discarding a session.
+
+    A session owns a connection-scoped Lightpanda target.  Removing its Python
+    object without closing that target leaves its websocket and daemon workers
+    alive, which can eventually exhaust the browser service after cancellations
+    or expiration.
+    """
+    if not session.tab:
+        return
+    try:
+        # Imported lazily to keep workflow independent of CDP setup at import
+        # time and to avoid a module-level dependency cycle.
+        from browser_assist_v2 import close_tab
+
+        close_tab(session.tab)
+    except Exception:
+        # Cleanup must not prevent a user from cancelling an otherwise usable
+        # Telegram session.  The closed session is no longer reachable either
+        # way.
+        pass
+
+
 def get(chat_id: int) -> Session | None:
     with _lock:
         session = _sessions.get(chat_id)
         if session and session.expires_at < time.time():
             session.event("session_expired", "warning")
             _sessions.pop(chat_id, None)
+            _close_session_tab(session)
             return None
         return session
 
@@ -67,6 +91,7 @@ def clear(chat_id: int) -> None:
         session = _sessions.pop(chat_id, None)
         if session:
             session.otp_polling = False
+            _close_session_tab(session)
 
 
 def touch(session: Session, seconds: int = 1800) -> None:
