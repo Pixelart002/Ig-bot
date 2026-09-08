@@ -6,6 +6,7 @@
     "browser": "node lightpanda_runner.js"
   },
   "dependencies": {
-    "@lightpanda/browser": "1.6.0"
+    "@lightpanda/browser": "1.6.0",
+    "puppeteer": "^23.0.0"
   }
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const { CDP } = require('lightpanda-cdp');  // npm install lightpanda-cdp
+import puppeteer from 'puppeteer';  // Headless browser automation
 
 // ---------- Logging ----------
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -17,7 +17,7 @@ async function runSignup(userData) {
     try {
         // START: Launch browser (headless = false so user can see OTP)
         log('🚀 Starting browser...');
-        browser = await CDP.launch({
+        browser = await puppeteer.launch({
             headless: false,   // OTP ke liye visible rakhna zaroori hai
             args: ['--no-sandbox', '--disable-dev-shm-usage']
         });

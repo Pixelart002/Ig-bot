@@ -25,19 +25,19 @@ NODE_TIMEOUT_SECONDS = 600
 # Compatibility stubs
 # ---------------------------------------------------------------------------
 
-async def capture_screenshot(
+def capture_screenshot(
     filename: str = "screenshot.png",
 ) -> Optional[bytes]:
     logger.warning("capture_screenshot() is not implemented")
     return None
 
 
-async def inspect_state() -> Dict[str, Any]:
+def inspect_state() -> Dict[str, Any]:
     logger.warning("inspect_state() is not implemented")
     return {"state": "unknown"}
 
 
-async def start_keepalive(
+def start_keepalive(
     tab: Any = None,
     interval: float = 1.5,
 ) -> None:
@@ -49,7 +49,7 @@ async def start_keepalive(
     )
 
 
-async def cdp_call(
+def cdp_call(
     method: str,
     params: Optional[dict] = None,
 ) -> Dict[str, Any]:
