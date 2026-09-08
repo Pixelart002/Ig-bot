@@ -36,13 +36,18 @@ async def cdp_call(method: str, params: dict = None) -> Dict[str, Any]:
     logger.warning(f"cdp_call({method}, {params}) called – not implemented, returning dummy")
     return {"result": "dummy", "method": method}
 
-# ----- Main signup function (uses Node script) -----
+# ----- Main signup function (uses Node script, accepts extra kwargs) -----
 
-async def start_signup(user_data: Dict[str, Any]) -> Dict[str, Any]:
+async def start_signup(user_data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
     """
     Call Node.js signup_flow.js with the given user data.
+    Extra keyword arguments (like on_progress) are ignored.
     Returns a dict with 'success' and 'state'.
     """
+    # Ignore on_progress and other extras (just log if provided)
+    if kwargs.get("on_progress"):
+        logger.info("on_progress callback provided – but ignored in this wrapper (Node script handles progress)")
+
     user_json = json.dumps(user_data)
     node_script = "signup_flow.js"   # Ensure this file exists in root
 
