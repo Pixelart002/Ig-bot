@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 browser_assist.py – Python wrapper for Lightpanda CDP actions.
-All heavy lifting is delegated to Node.js scripts.
+All heavy lifting delegated to Node.js scripts.
 """
 
 import asyncio
@@ -12,31 +12,29 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# ----- Existing functions (now stubs or implemented via Node) -----
+# ----- Stub functions (to keep imports working) -----
 
 async def capture_screenshot(filename: str = "screenshot.png") -> Optional[bytes]:
-    """
-    Capture screenshot of current page.
-    STUB: logs a warning and returns None.
-    To implement, create a Node script (screenshot.js) that uses CDP.
-    """
-    logger.warning("capture_screenshot() not implemented yet – returning None")
+    """Stub – logs warning."""
+    logger.warning("capture_screenshot() not implemented – returning None")
     return None
 
 async def inspect_state() -> Dict[str, Any]:
-    """
-    Inspect current page state (e.g., URL, title, etc.)
-    STUB: returns a dummy dictionary.
-    """
-    logger.warning("inspect_state() not implemented yet – returning dummy")
+    """Stub – returns dummy."""
+    logger.warning("inspect_state() not implemented – returning dummy")
     return {"state": "unknown", "url": "", "title": ""}
 
 async def start_keepalive():
-    """
-    Start a keep-alive mechanism (e.g., periodic page refresh).
-    STUB: does nothing.
-    """
+    """Stub – does nothing."""
     logger.info("start_keepalive() called – no-op stub")
+
+async def cdp_call(method: str, params: dict = None) -> Dict[str, Any]:
+    """
+    Stub for direct CDP calls. 
+    In the new flow, all CDP logic is inside Node.js signup_flow.js.
+    """
+    logger.warning(f"cdp_call({method}, {params}) called – not implemented, returning dummy")
+    return {"result": "dummy", "method": method}
 
 # ----- Main signup function (uses Node script) -----
 
@@ -85,9 +83,7 @@ async def start_signup(user_data: Dict[str, Any]) -> Dict[str, Any]:
         logger.exception(f"❌ Exception: {e}")
         return {"success": False, "state": "EXCEPTION", "error": str(e)}
 
-# ----- Synchronous wrappers (if needed) -----
+# ----- Synchronous wrapper (if needed) -----
 
 def start_signup_sync(user_data: Dict[str, Any]) -> Dict[str, Any]:
     return asyncio.run(start_signup(user_data))
-
-# We keep the same function names as before so telegram_bot imports work.
