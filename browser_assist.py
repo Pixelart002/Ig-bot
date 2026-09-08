@@ -1,91 +1,167 @@
 #!/usr/bin/env python3
 """
-browser_assist.py – Python wrapper for Lightpanda CDP actions.
-All heavy lifting delegated to Node.js scripts.
+browser_assist.py – Compatibility wrapper for the browser runner.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import subprocess
-from typing import Dict, Any, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# ----- Stub async functions (kept for compatibility) -----
+ProgressCallback = Optional[Callable[..., Any]]
 
-async def capture_screenshot(filename: str = "screenshot.png") -> Optional[bytes]:
-    logger.warning("capture_screenshot() not implemented – returning None")
+
+async def capture_screenshot(
+    filename: str = "screenshot.png",
+) -> Optional[bytes]:
+    logger.warning("capture_screenshot() is not implemented")
     return None
 
+
 async def inspect_state() -> Dict[str, Any]:
-    logger.warning("inspect_state() not implemented – returning dummy")
-    return {"state": "unknown", "url": "", "title": ""}
+    logger.warning("inspect_state() is not implemented")
+    return {
+        "state": "unknown",
+        "url": "",
+        "title": "",
+    }
 
-async def start_keepalive():
-    logger.info("start_keepalive() called – no-op stub")
 
-async def cdp_call(method: str, params: dict = None) -> Dict[str, Any]:
-    logger.warning(f"cdp_call({method}, {params}) called – not implemented, returning dummy")
-    return {"result": "dummy", "method": method}
+async def start_keepalive() -> None:
+    logger.info("start_keepalive() compatibility no-op")
 
-# ----- Main signup function – SYNCHRONOUS (no asyncio) -----
 
-def start_signup(user_data: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
+async def cdp_call(
+    method: str,
+    params: Optional[dict] = None,
+) -> Dict[str, Any]:
+    logger.warning(
+        "cdp_call(%s) is not implemented in this compatibility wrapper",
+        method,
+    )
+    return {
+        "result": "dummy",
+        "method": method,
+    }
+
+
+def start_signup(
+    credentials: Dict[str, Any],
+    identity: Any = None,
+    on_progress: ProgressCallback = None,
+) -> tuple[Optional[str], bool]:
     """
-    Call Node.js signup_flow.js synchronously.
-    Any extra args (e.g. on_progress) are ignored.
-    Returns dict with 'success' and 'state'.
+    Compatibility wrapper.
+
+    `identity` and `on_progress` are accepted so callers using the
+    newer interface do not crash with an unexpected-keyword error.
     """
-    if args:
-        logger.info(f"Extra positional args provided (ignored): {args}")
-    if kwargs.get("on_progress"):
-        logger.info("on_progress callback provided – ignored (Node handles progress)")
+
+    if not isinstance(credentials, dict):
+        logger.error("credentials must be a dictionary")
+        return None, False
+
+    if on_progress is not None:
+        logger.info("Progress callback supplied")
+
+    user_data = {
+        "email": credentials.get("email"),
+        "password": credentials.get("password"),
+        "birthday": credentials.get("birthday"),
+        "full_name": credentials.get("full_name"),
+        "username": credentials.get("username"),
+    }
+
+    required = (
+        "email",
+        "password",
+        "birthday",
+        "full_name",
+        "username",
+    )
+
+    missing = [key for key in required if not user_data.get(key)]
+
+    if missing:
+        logger.error("Missing required fields: %s", ", ".join(missing))
+        return None, False
 
     user_json = json.dumps(user_data)
-    node_script = "signup_flow.js"
-
-    logger.info(f"🚀 Launching Node signup flow for {user_data.get('email')}")
 
     try:
-        # Synchronous subprocess call
         proc = subprocess.run(
-            ["node", node_script, user_json],
+            ["node", "signup_flow.js", user_json],
             capture_output=True,
             text=True,
-            timeout=600  # 10 minutes max
+            timeout=600,
+            check=False,
         )
 
-        if proc.stderr:
-            logger.warning(f"Node stderr: {proc.stderr}")
-
-        output = proc.stdout.strip()
-        # Parse last line as JSON
-        lines = output.splitlines()
-        json_line = None
-        for line in reversed(lines):
-            line = line.strip()
-            if line.startswith('{') and line.endswith('}'):
-                json_line = line
-                break
-        if not json_line:
-            logger.error(f"No JSON found in output: {output}")
-            return {"success": False, "state": "PARSE_ERROR", "error": "No JSON output"}
-
-        result = json.loads(json_line)
-        logger.info(f"✅ Signup result: {result}")
-        return result
-
     except subprocess.TimeoutExpired:
-        logger.error("❌ Node script timed out after 10 minutes")
-        return {"success": False, "state": "TIMEOUT", "error": "Script timed out"}
-    except FileNotFoundError:
-        logger.error("❌ Node.js not found. Please install Node.js.")
-        return {"success": False, "state": "SYSTEM_ERROR", "error": "Node not found"}
-    except Exception as e:
-        logger.exception(f"❌ Exception: {e}")
-        return {"success": False, "state": "EXCEPTION", "error": str(e)}
+        logger.error("Node process timed out")
+        return None, False
 
-# ----- (Optional) Async wrapper if someone still uses await -----
-async def start_signup_async(user_data: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
-    """Async wrapper for the synchronous function (rarely needed)."""
-    return start_signup(user_data, *args, **kwargs)
+    except FileNotFoundError:
+        logger.error("Node.js is not installed")
+        return None, False
+
+    except OSError:
+        logger.exception("Failed to start Node process")
+        return None, False
+
+    if proc.stderr.strip():
+        logger.warning("Node stderr: %s", proc.stderr.strip())
+
+    output = proc.stdout.strip()
+
+    if not output:
+        logger.error("Node process returned no stdout")
+        return None, False
+
+    result = None
+
+    for line in reversed(output.splitlines()):
+        line = line.strip()
+
+        if not line:
+            continue
+
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(candidate, dict):
+            result = candidate
+            break
+
+    if result is None:
+        logger.error("No JSON result found in Node output")
+        return None, False
+
+    logger.info("Node result: %s", result)
+
+    if result.get("success") is True:
+        return f"node-{proc.pid}", True
+
+    logger.error(
+        "Operation failed: %s",
+        result.get("error", "unknown error"),
+    )
+    return None, False
+
+
+def start_signup_sync(
+    credentials: Dict[str, Any],
+    identity: Any = None,
+    on_progress: ProgressCallback = None,
+) -> tuple[Optional[str], bool]:
+    return start_signup(
+        credentials,
+        identity=identity,
+        on_progress=on_progress,
+    )
