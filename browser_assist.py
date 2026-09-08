@@ -4,7 +4,6 @@ browser_assist.py – Python wrapper for Lightpanda CDP actions.
 All heavy lifting delegated to Node.js scripts.
 """
 
-import asyncio
 import json
 import logging
 import subprocess
@@ -12,7 +11,7 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# ----- Stub functions (to keep imports working) -----
+# ----- Stub async functions (kept for compatibility) -----
 
 async def capture_screenshot(filename: str = "screenshot.png") -> Optional[bytes]:
     logger.warning("capture_screenshot() not implemented – returning None")
@@ -29,18 +28,18 @@ async def cdp_call(method: str, params: dict = None) -> Dict[str, Any]:
     logger.warning(f"cdp_call({method}, {params}) called – not implemented, returning dummy")
     return {"result": "dummy", "method": method}
 
-# ----- Main signup function – accepts any extra positional/keyword args -----
+# ----- Main signup function – SYNCHRONOUS (no asyncio) -----
 
-async def start_signup(user_data: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
+def start_signup(user_data: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
     """
-    Call Node.js signup_flow.js with given user_data.
-    Any extra positional arguments (like on_progress callback) are ignored.
+    Call Node.js signup_flow.js synchronously.
+    Any extra args (e.g. on_progress) are ignored.
+    Returns dict with 'success' and 'state'.
     """
-    # Log if a progress callback was provided (it's usually the second positional arg)
-    if len(args) > 0:
-        logger.info(f"Extra positional arguments provided (ignored): {args}")
+    if args:
+        logger.info(f"Extra positional args provided (ignored): {args}")
     if kwargs.get("on_progress"):
-        logger.info("on_progress callback provided – but ignored in this wrapper (Node handles progress)")
+        logger.info("on_progress callback provided – ignored (Node handles progress)")
 
     user_json = json.dumps(user_data)
     node_script = "signup_flow.js"
@@ -48,17 +47,19 @@ async def start_signup(user_data: Dict[str, Any], *args, **kwargs) -> Dict[str, 
     logger.info(f"🚀 Launching Node signup flow for {user_data.get('email')}")
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "node", node_script, user_json,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+        # Synchronous subprocess call
+        proc = subprocess.run(
+            ["node", node_script, user_json],
+            capture_output=True,
+            text=True,
+            timeout=600  # 10 minutes max
         )
-        stdout, stderr = await proc.communicate()
 
-        if stderr:
-            logger.warning(f"Node stderr: {stderr.decode()}")
+        if proc.stderr:
+            logger.warning(f"Node stderr: {proc.stderr}")
 
-        output = stdout.decode().strip()
+        output = proc.stdout.strip()
+        # Parse last line as JSON
         lines = output.splitlines()
         json_line = None
         for line in reversed(lines):
@@ -74,6 +75,9 @@ async def start_signup(user_data: Dict[str, Any], *args, **kwargs) -> Dict[str, 
         logger.info(f"✅ Signup result: {result}")
         return result
 
+    except subprocess.TimeoutExpired:
+        logger.error("❌ Node script timed out after 10 minutes")
+        return {"success": False, "state": "TIMEOUT", "error": "Script timed out"}
     except FileNotFoundError:
         logger.error("❌ Node.js not found. Please install Node.js.")
         return {"success": False, "state": "SYSTEM_ERROR", "error": "Node not found"}
@@ -81,6 +85,7 @@ async def start_signup(user_data: Dict[str, Any], *args, **kwargs) -> Dict[str, 
         logger.exception(f"❌ Exception: {e}")
         return {"success": False, "state": "EXCEPTION", "error": str(e)}
 
-# ----- Synchronous wrapper -----
-def start_signup_sync(user_data: Dict[str, Any]) -> Dict[str, Any]:
-    return asyncio.run(start_signup(user_data))
+# ----- (Optional) Async wrapper if someone still uses await -----
+async def start_signup_async(user_data: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
+    """Async wrapper for the synchronous function (rarely needed)."""
+    return start_signup(user_data, *args, **kwargs)
